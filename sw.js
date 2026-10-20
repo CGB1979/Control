@@ -1,0 +1,4 @@
+const CACHE="control-laboral-v1";const SHELL=["./","./index.html","./manifest.json","./css/styles.css","./js/app.js","./js/config.js","./js/storage.js","./js/calculos.js","./js/francos.js","./js/feriados.js","./js/marcaciones.js","./js/calendar.js","./js/ui.js","./assets/icon.svg"];
+self.addEventListener("install",e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting())));
+self.addEventListener("activate",e=>e.waitUntil(caches.keys().then(xs=>Promise.all(xs.filter(x=>x!==CACHE).map(x=>caches.delete(x)))).then(()=>self.clients.claim())));
+self.addEventListener("fetch",e=>{if(e.request.url.includes("api.argentinadatos.com")){e.respondWith(fetch(e.request).catch(()=>new Response("[]",{headers:{"Content-Type":"application/json"}})));return}e.respondWith(caches.match(e.request).then(c=>c||fetch(e.request).then(r=>{const x=r.clone();caches.open(CACHE).then(c=>c.put(e.request,x));return r}).catch(()=>caches.match("./index.html"))))});

@@ -1,0 +1,4 @@
+const API="https://api.argentinadatos.com/v1/feriados";
+export async function actualizarFeriados(d,a){try{const r=await fetch(`${API}/${a}`,{cache:"no-store"});if(!r.ok)throw Error(`HTTP ${r.status}`);const xs=await r.json();if(!Array.isArray(xs))throw Error("Respuesta inválida");xs.forEach(x=>{if(x.fecha)d.feriados.fechas[x.fecha]={fecha:x.fecha,tipo:x.tipo||"desconocido",nombre:x.nombre||"Feriado",fuente:"API"}});d.feriados.ultimaActualizacion=new Date().toISOString();return{ok:true,cantidad:xs.length}}catch(error){console.warn("Feriados:",error);return{ok:false,error}}}
+export const feriadoDe=(d,f)=>d.feriados?.fechas?.[f]||null;
+export const formatearActualizacion=d=>d.feriados?.ultimaActualizacion?`Última actualización de feriados: ${new Date(d.feriados.ultimaActualizacion).toLocaleString("es-AR")}`:"Todavía no hay una actualización de feriados guardada.";
