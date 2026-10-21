@@ -181,3 +181,10 @@ button { -webkit-tap-highlight-color: transparent; }
   .cl-app { min-height: 100vh; }
   .cl-bottom-nav { border-left: 1px solid var(--cl-border); border-right: 1px solid var(--cl-border); }
 }
+
+.cl-list-item-used { background: #f1f3f5; border-color: #e2e6ea; color: #8a939d; }
+.cl-list-item-used .cl-list-dot { background: #b8bec5; }
+.cl-list-item-used .cl-list-title { color: #8a939d; }
+.cl-list-item-used .cl-list-meta { color: #9aa2ab; }
+.cl-list-item-available .cl-list-dot { background: var(--cl-success); }
+.cl-available-label { color: var(--cl-success) !important; font-weight: 750; }

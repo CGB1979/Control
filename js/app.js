@@ -1,10 +1,10 @@
-import { CONFIG, MESES } from "./config.js";
+import { CONFIG, MESES, VERSION_APP } from "./config.js";
 import { loadState, saveState, addAudit, exportState, importState } from "./storage.js";
 import { isoDate, calculateDay, minutesFromTime, timeFromMinutes, suggestLateOrShift } from "./time.js";
 import { getHolidays, updateExternalHolidays } from "./holidays.js";
 import { renderCalendar, bindCalendar } from "./calendar.js";
-import { renderSummary, calculateMonth, formatHours } from "./summary.js";
-import { syncGeneratedForDay, useFullLeave, useHalfLeave, useThreeHalvesForFullDay, leaveTotals, availableFull, availableHalf, debtFull, debtHalf, markDebtPaid } from "./leaves.js";
+import { renderSummary, calculateMonth, calculateBillingCycle, formatHours } from "./summary.js";
+import { syncAllGenerated, syncSaturdayClassifications, syncGeneratedForDay, useFullLeave, useHalfLeave, useThreeHalvesForFullDay, leaveTotals, availableFull, availableHalf, debtFull, debtHalf, markDebtPaid, rollbackLeaveUsageForDate } from "./leaves.js";
 import { openModal, closeModal, modalHead, escapeHtml, confirmAction } from "./ui.js";
 
 const state = loadState();
@@ -16,25 +16,8 @@ function dateFromKey(key) { const [y,m,d] = key.split("-").map(Number); return n
 function formatDate(key) { return dateFromKey(key).toLocaleDateString("es-AR", { weekday: "long", day: "2-digit", month: "long", year: "numeric" }); }
 function currentTime() { return new Date().toTimeString().slice(0,5); }
 
-function ensureSaturdayClassifications(year, month) {
-  const days = new Date(year, month + 1, 0).getDate();
-  const worked = [];
-  for (let d = 1; d <= days; d++) {
-    const date = new Date(year, month, d);
-    if (date.getDay() !== 6) continue;
-    const key = isoDate(date);
-    const record = state.records[key];
-    if (!record?.punches?.length) continue;
-    worked.push({ key, record });
-  }
-  worked.sort((a,b) => a.key.localeCompare(b.key));
-  let mandatoryCount = worked.filter(x => x.record.saturdayType === "mandatory").length;
-  for (const item of worked) {
-    if (item.record.saturdayType === "mandatory" || item.record.saturdayType === "voluntario") continue;
-    item.record.saturdayType = mandatoryCount < CONFIG.CANTIDAD_SABADOS_OBLIGATORIOS ? "mandatory" : "voluntario";
-    item.record.saturdayClassification = "provisional";
-    mandatoryCount += item.record.saturdayType === "mandatory" ? 1 : 0;
-  }
+function ensureSaturdayClassifications() {
+  syncSaturdayClassifications(state);
 }
 
 function render() {
@@ -50,15 +33,16 @@ function render() {
 }
 
 function renderCalendarScreen() {
-  ensureSaturdayClassifications(view.year, view.month);
+  syncAllGenerated(state);
   save();
   const calendar = renderCalendar(state, view);
   const holidays = getHolidays(state, view.year);
   const today = isoDate(new Date());
-  const { totals } = calculateMonth(state, view.year, view.month);
+  const { start, end, totals } = calculateBillingCycle(state, new Date(view.year, view.month, 15));
   main.innerHTML = `${calendar}
     <section class="cl-card">
-      <h3>Resumen del mes</h3>
+      <h3>Resumen del ciclo de facturación</h3>
+      <div class="cl-muted cl-small">${start.toLocaleDateString("es-AR")} al ${end.toLocaleDateString("es-AR")}</div>
       <div class="cl-grid-3">
         <div class="cl-stat"><div class="value">${totals.jornales}</div><div class="label">Jornales</div></div>
         <div class="cl-stat"><div class="value">${formatHours(totals.extra50)}</div><div class="label">Extras 50 %</div></div>
@@ -85,7 +69,7 @@ function openDayModal(dateKey) {
   const holiday = getHolidays(state, date.getFullYear())[dateKey];
   const record = state.records[dateKey] || { punches: [], saturdayType: null, leaveMode: null, lateDecision: null, needsReview: false };
   state.records[dateKey] = record;
-  const calc = calculateDay(record, date, holiday);
+  const calc = calculateDay(record, date, holiday, state.settings);
   syncGeneratedForDay(state, dateKey, calc);
   save();
 
@@ -138,6 +122,7 @@ function openDayModal(dateKey) {
   if (noWork) noWork.addEventListener("click", () => { record.holidayNoWork = true; save(); closeModal(); render(); });
   document.getElementById("cl-delete-day").addEventListener("click", () => {
     confirmAction("¿Eliminar todas las marcaciones y datos de prueba de este día? Esta acción está pensada para las pruebas actuales.", () => {
+      rollbackLeaveUsageForDate(state, dateKey);
       delete state.records[dateKey];
       addAudit(state, "registro_dia_eliminado", { date: dateKey });
       save(); closeModal(); render();
@@ -329,12 +314,27 @@ function useFullForDay(dateKey) {
 function renderSummaryScreen() { main.innerHTML = renderSummary(state); }
 
 function renderLeavesScreen() {
+  syncAllGenerated(state);
+  save();
   const totals = leaveTotals(state);
   main.innerHTML = `
     <section class="cl-card"><h2>Control acumulativo</h2><div class="cl-muted cl-small">Se actualiza cada vez que se genera, usa o adeuda un franco.</div></section>
-    <section class="cl-card"><h3>Francos enteros</h3><div class="cl-grid-3"><div class="cl-stat"><div class="value">${totals.fullGenerated}</div><div class="label">Generados</div></div><div class="cl-stat"><div class="value">${totals.fullUsed}</div><div class="label">Usados</div></div><div class="cl-stat"><div class="value">${totals.fullAvailable}</div><div class="label">Disponibles</div></div></div><button class="cl-btn cl-btn-outline cl-btn-full" style="margin-top:10px" id="cl-list-full">Ver días generados</button></section>
-    <section class="cl-card"><h3>Medios francos</h3><div class="cl-grid-3"><div class="cl-stat"><div class="value">${totals.halfGenerated}</div><div class="label">Generados</div></div><div class="cl-stat"><div class="value">${totals.halfUsed}</div><div class="label">Usados</div></div><div class="cl-stat"><div class="value">${totals.halfAvailable}</div><div class="label">Disponibles</div></div></div><button class="cl-btn cl-btn-outline cl-btn-full" style="margin-top:10px" id="cl-list-half">Ver días generados</button></section>
-    <section class="cl-card"><h3>Adeudados</h3><div class="cl-grid-2"><div class="cl-stat"><div class="value">${totals.fullDebt}</div><div class="label">Francos adeudados</div></div><div class="cl-stat"><div class="value">${totals.halfDebt}</div><div class="label">Medios adeudados</div></div></div><div class="cl-action-grid" style="margin-top:10px"><button class="cl-btn cl-btn-outline" id="cl-list-debt-full">Ver francos</button><button class="cl-btn cl-btn-outline" id="cl-list-debt-half">Ver medios</button></div></section>`;
+    <section class="cl-card"><h3>Francos enteros</h3>
+      <div class="cl-grid-2">
+        <div class="cl-stat"><div class="value">${totals.fullAvailable}</div><div class="label">Disponibles</div></div>
+        <div class="cl-stat"><div class="value">${totals.fullDebt}</div><div class="label">Adeudados</div></div>
+      </div>
+      <button class="cl-btn cl-btn-outline cl-btn-full" style="margin-top:10px" id="cl-list-full">Ver días donde se generaron</button>
+      <button class="cl-btn cl-btn-secondary cl-btn-full" style="margin-top:8px" id="cl-list-debt-full">Ver francos adeudados</button>
+    </section>
+    <section class="cl-card"><h3>Medios francos</h3>
+      <div class="cl-grid-2">
+        <div class="cl-stat"><div class="value">${totals.halfAvailable}</div><div class="label">Disponibles</div></div>
+        <div class="cl-stat"><div class="value">${totals.halfDebt}</div><div class="label">Adeudados</div></div>
+      </div>
+      <button class="cl-btn cl-btn-outline cl-btn-full" style="margin-top:10px" id="cl-list-half">Ver días donde se generaron</button>
+      <button class="cl-btn cl-btn-secondary cl-btn-full" style="margin-top:8px" id="cl-list-debt-half">Ver medios adeudados</button>
+    </section>`;
 
   document.getElementById("cl-list-full").addEventListener("click", () => openLeaveList("Francos generados", state.leaves.fullGenerated, "franco"));
   document.getElementById("cl-list-half").addEventListener("click", () => openLeaveList("Medios francos generados", state.leaves.halfGenerated, "medio_franco"));
@@ -344,8 +344,40 @@ function renderLeavesScreen() {
 
 function openLeaveList(title, items, type, debts = false) {
   const sorted = [...items].sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const listHtml = sorted.length ? sorted.map(item => {
+    const used = !debts && item.status === "usado";
+    const statusText = debts ? "Pendiente / adelantado" : used ? `Usado el ${item.usedOn}` : "Disponible";
+    const cls = used ? " cl-list-item-used" : " cl-list-item-available";
+    return `<button type="button" class="cl-list-item${cls}" data-leave-date="${escapeHtml(item.date)}" aria-label="${escapeHtml(formatDate(item.date))}">
+      <span class="cl-list-dot"></span>
+      <span><span class="cl-list-title">${escapeHtml(formatDate(item.date))}</span><span class="cl-list-meta ${used ? "cl-used-label" : "cl-available-label"}">${escapeHtml(statusText)}</span></span>
+      <span>›</span>
+    </button>`;
+  }).join("") : `<div class="cl-note">No hay registros.</div>`;
+
   openModal(`${modalHead(title)}
-    <div class="cl-list">${sorted.length ? sorted.map(item => `<div class="cl-list-item"><span class="cl-list-dot"></span><div><div class="cl-list-title">${formatDate(item.date)}</div><div class="cl-list-meta">${debts ? "Pendiente / adelantado" : item.status === "usado" ? `Usado el ${item.usedOn}` : "Disponible"}</div></div><span>›</span></div>`).join("") : `<div class="cl-note">No hay registros.</div>`}</div>`);
+    <div class="cl-list">${listHtml}</div>
+    <div class="cl-note">Doble toque sobre un día para ir a ese día en el calendario.</div>`);
+
+  document.querySelectorAll("[data-leave-date]").forEach(button => {
+    let lastTap = 0;
+    button.addEventListener("click", () => {
+      const now = Date.now();
+      if (now - lastTap < 420) {
+        const dateKey = button.dataset.leaveDate;
+        const date = dateFromKey(dateKey);
+        view.screen = "calendar";
+        view.year = date.getFullYear();
+        view.month = date.getMonth();
+        view.selected = dateKey;
+        closeModal();
+        render();
+        lastTap = 0;
+      } else {
+        lastTap = now;
+      }
+    });
+  });
 }
 
 function renderHistoryScreen() {
@@ -371,26 +403,50 @@ function historyLabel(action) {
 }
 
 function renderSettings() {
+  const draft = {
+    tolerance: Number(state.settings.tolerance ?? CONFIG.TOLERANCIA_MINUTOS),
+    roundIn: state.settings.roundIn ?? CONFIG.REDONDEO_ENTRADA,
+    roundOut: state.settings.roundOut ?? CONFIG.REDONDEO_SALIDA,
+    feriadoExcesoGeneraFranco: Boolean(state.settings.feriadoExcesoGeneraFranco ?? CONFIG.FERIADO_EXCESO_GENERA_FRANCO)
+  };
+
   openModal(`${modalHead("Configuración")}
     <section class="cl-card" style="box-shadow:none;margin:0 0 10px"><h3>Reglas laborales</h3>
       <div class="cl-form-group"><label>Jornal normal</label><input class="cl-input" value="${CONFIG.JORNAL_NORMAL_HORAS}" disabled></div>
-      <div class="cl-form-group"><label>Tolerancia (minutos)</label><input id="cl-setting-tolerance" class="cl-input" type="number" min="0" value="${CONFIG.TOLERANCIA_MINUTOS}"></div>
+      <div class="cl-form-group"><label>Tolerancia (minutos)</label><input id="cl-setting-tolerance" class="cl-input" type="number" min="0" value="${draft.tolerance}"></div>
       <div class="cl-form-group"><label>Redondeo de entrada</label><select id="cl-setting-round-in" class="cl-input"><option value="ninguno">Sin redondeo</option><option value="abajo">Abajo</option><option value="arriba">Arriba</option><option value="cercano">Más cercano</option></select></div>
       <div class="cl-form-group"><label>Redondeo de salida</label><select id="cl-setting-round-out" class="cl-input"><option value="ninguno">Sin redondeo</option><option value="abajo">Abajo</option><option value="arriba">Arriba</option><option value="cercano">Más cercano</option></select></div>
+      <div class="cl-form-group"><label>Feriado trabajado genera franco si supera 8 h</label><select id="cl-setting-holiday-leave" class="cl-input"><option value="false">No</option><option value="true">Sí</option></select></div>
     </section>
     <section class="cl-card" style="box-shadow:none;margin:0"><h3>Datos</h3>
       <button class="cl-btn cl-btn-outline cl-btn-full" id="cl-export">Exportar respaldo JSON</button>
       <label class="cl-btn cl-btn-secondary cl-btn-full" style="display:block;text-align:center;margin-top:8px;cursor:pointer">Importar respaldo <input id="cl-import" type="file" accept="application/json" hidden></label>
       <div class="cl-note cl-danger-note">El almacenamiento local no sincroniza automáticamente entre dispositivos. Borrar los datos del navegador puede provocar pérdida de información si no tenés un respaldo.</div>
-    </section>`);
+    </section>
+    <div class="cl-modal-actions">
+      <button class="cl-btn cl-btn-secondary" id="cl-settings-cancel" type="button">Cancelar</button>
+      <button class="cl-btn cl-btn-primary" id="cl-settings-save" type="button">Guardar</button>
+    </div>`);
 
   const rIn = document.getElementById("cl-setting-round-in");
   const rOut = document.getElementById("cl-setting-round-out");
-  rIn.value = CONFIG.REDONDEO_ENTRADA;
-  rOut.value = CONFIG.REDONDEO_SALIDA;
-  rIn.addEventListener("change", e => state.settings.roundIn = e.target.value);
-  rOut.addEventListener("change", e => state.settings.roundOut = e.target.value);
-  document.getElementById("cl-setting-tolerance").addEventListener("change", e => state.settings.tolerance = Number(e.target.value));
+  const holidayLeave = document.getElementById("cl-setting-holiday-leave");
+  rIn.value = draft.roundIn;
+  rOut.value = draft.roundOut;
+  holidayLeave.value = String(draft.feriadoExcesoGeneraFranco);
+
+  document.getElementById("cl-settings-cancel").addEventListener("click", closeModal);
+  document.getElementById("cl-settings-save").addEventListener("click", () => {
+    state.settings.tolerance = Math.max(0, Number(document.getElementById("cl-setting-tolerance").value) || 0);
+    state.settings.roundIn = rIn.value;
+    state.settings.roundOut = rOut.value;
+    state.settings.feriadoExcesoGeneraFranco = holidayLeave.value === "true";
+    addAudit(state, "configuracion_actualizada", { ...state.settings });
+    save();
+    closeModal();
+    render();
+  });
+
   document.getElementById("cl-export").addEventListener("click", () => exportState(state));
   document.getElementById("cl-import").addEventListener("change", async e => {
     const file = e.target.files?.[0]; if (!file) return;
@@ -407,10 +463,31 @@ function renderSettings() {
 document.querySelectorAll(".cl-nav-btn").forEach(btn => btn.addEventListener("click", () => { view.screen = btn.dataset.screen; render(); }));
 document.getElementById("btn-settings").addEventListener("click", renderSettings);
 
-// Intento real de actualización solo si se configuró una fuente externa.
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./service-worker.js').catch(error => console.warn('PWA no disponible:', error));
+// Actualización automática de archivos de la aplicación.
+// La versión se guarda separada de los registros: actualizar archivos
+// nunca borra los datos personales guardados en localStorage.
+async function comprobarVersionYActualizar() {
+  const VERSION_KEY = "control_laboral_app_version";
+  const instalada = localStorage.getItem(VERSION_KEY);
+  localStorage.setItem(VERSION_KEY, VERSION_APP);
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    const registration = await navigator.serviceWorker.register("./service-worker.js");
+    await registration.update();
+    if (instalada && instalada !== VERSION_APP) sessionStorage.setItem("control_laboral_actualizacion_pendiente", "1");
+  } catch (error) {
+    console.warn("No se pudo comprobar la actualización de la aplicación:", error);
+  }
 }
+
+navigator.serviceWorker?.addEventListener("controllerchange", () => {
+  if (sessionStorage.getItem("control_laboral_actualizacion_pendiente") === "1") {
+    sessionStorage.removeItem("control_laboral_actualizacion_pendiente");
+    window.location.reload();
+  }
+});
+
+comprobarVersionYActualizar();
 updateExternalHolidays(state).then(result => { if (result.updated) { save(); if (view.screen === "calendar") render(); } });
 
 render();

@@ -19,7 +19,7 @@ export function renderCalendar(state, view, onOpenDay) {
     const inMonth = date.getMonth() === month;
     const record = state.records[key] || { punches: [] };
     const holiday = holidays[key];
-    const calc = calculateDay(record, date, holiday);
+    const calc = calculateDay(record, date, holiday, state.settings);
     const sat = isSaturday(date);
     const sun = isSunday(date);
 

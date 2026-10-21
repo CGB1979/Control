@@ -50,7 +50,7 @@ export const CONFIG = {
 
   // Inicio del mes de facturación. 1 = mes calendario.
   // Si luego necesitás, por ejemplo, del 21 al 20, cambiar a 21.
-  DIA_INICIO_FACTURACION: 1,
+  DIA_INICIO_FACTURACION: 25,
 
   // Detección de llegada tarde/cambio de turno.
   MAX_RETRASO_INFERIDO_MINUTOS: 25,
@@ -71,3 +71,7 @@ export const MESES = [
   "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
 ];
+
+// Por defecto: NO. Puede activarse desde la configuración.
+export const VERSION_APP = "1.0.6";
+export const FERIADO_EXCESO_GENERA_FRANCO = false;

@@ -20,7 +20,7 @@ export function monthRecords(state, year, month) {
     const key = isoDate(date);
     const record = state.records[key];
     if (!record) continue;
-    result.push({ key, date, record, calc: calculateDay(record, date, holidays[key]), holiday: holidays[key] });
+    result.push({ key, date, record, calc: calculateDay(record, date, holidays[key], state.settings), holiday: holidays[key] });
   }
   return result;
 }
@@ -34,6 +34,7 @@ export function calculateMonth(state, year, month) {
     totals.extra50 += row.calc.extra50Minutes;
     totals.extra100 += row.calc.extra100Minutes;
     if (row.record.leaveMode === "medio_franco") totals.jornales += 1;
+    else if (row.calc.worked && (row.calc.sunday || row.calc.holidayWorked)) totals.jornales += 1;
     else if (row.calc.countedMinutes >= 8 * 60 && !row.record.leaveMode) totals.jornales += 1;
     if (row.calc.review) totals.reviews += 1;
     if (row.holiday && row.calc.worked) totals.holidayWorked += 1;
@@ -53,7 +54,7 @@ export function calculateBillingCycle(state, date = new Date()) {
     const holidays = getHolidays(state, cursor.getFullYear());
     if (record) {
       const holiday = holidays[key];
-      const calc = calculateDay(record, new Date(cursor), holiday);
+      const calc = calculateDay(record, new Date(cursor), holiday, state.settings);
       const row = { key, date: new Date(cursor), record, calc, holiday };
       rows.push(row);
       totals.real += calc.realMinutes;
@@ -61,6 +62,7 @@ export function calculateBillingCycle(state, date = new Date()) {
       totals.extra50 += calc.extra50Minutes;
       totals.extra100 += calc.extra100Minutes;
       if (record.leaveMode === "medio_franco") totals.jornales += 1;
+      else if (calc.worked && (calc.sunday || calc.holidayWorked)) totals.jornales += 1;
       else if (calc.countedMinutes >= 8 * 60 && !record.leaveMode) totals.jornales += 1;
       if (calc.review) totals.reviews += 1;
       if (holiday && calc.worked) totals.holidayWorked += 1;
@@ -72,9 +74,6 @@ export function calculateBillingCycle(state, date = new Date()) {
 }
 
 export function renderSummary(state, date = new Date()) {
-  const { start, end } = billingRange(date);
-  const year = start.getFullYear();
-  const month = start.getMonth();
   const { start, end, totals } = calculateBillingCycle(state, date);
   const leaves = leaveTotals(state);
 
