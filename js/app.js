@@ -342,39 +342,86 @@ function renderLeavesScreen() {
   document.getElementById("cl-list-debt-half").addEventListener("click", () => openLeaveList("Medios francos adeudados", state.leaves.halfDebt, "medio_franco", true));
 }
 
+function goToCalendarDate(dateKey) {
+  const date = dateFromKey(dateKey);
+  view.screen = "calendar";
+  view.year = date.getFullYear();
+  view.month = date.getMonth();
+  view.selected = dateKey;
+  closeModal();
+  render();
+  // Desde cualquier lista de francos, la fecha seleccionada debe abrir
+  // directamente el mismo modal de entrada/salida que se abre desde
+  // un doble toque en el calendario.
+  openDayModal(dateKey);
+}
+
+function openLeaveDateDetail(item) {
+  const generatedDate = item.date;
+  const usedDate = item.usedOn;
+
+  openModal(`${modalHead("Detalle del franco")}
+    <section class="cl-card" style="box-shadow:none;margin:0;padding:4px 0">
+      <button type="button" class="cl-detail-date" id="cl-generated-date">
+        <span class="cl-detail-label">Fecha generada</span>
+        <strong>${escapeHtml(formatDate(generatedDate))}</strong>
+        <span class="cl-detail-hint">Doble toque para ir a ese día</span>
+      </button>
+      <button type="button" class="cl-detail-date" id="cl-used-date">
+        <span class="cl-detail-label">Fecha usada</span>
+        <strong>${escapeHtml(formatDate(usedDate))}</strong>
+        <span class="cl-detail-hint">Doble toque para ir a ese día</span>
+      </button>
+    </section>`);
+
+  bindDoubleTap(document.getElementById("cl-generated-date"), () => goToCalendarDate(generatedDate));
+  bindDoubleTap(document.getElementById("cl-used-date"), () => goToCalendarDate(usedDate));
+}
+
+function bindDoubleTap(button, onDoubleTap) {
+  if (!button) return;
+  let lastTap = 0;
+  button.addEventListener("click", () => {
+    const now = Date.now();
+    if (now - lastTap < 420) {
+      lastTap = 0;
+      onDoubleTap();
+    } else {
+      lastTap = now;
+    }
+  });
+}
+
 function openLeaveList(title, items, type, debts = false) {
   const sorted = [...items].sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
   const listHtml = sorted.length ? sorted.map(item => {
     const used = !debts && item.status === "usado";
-    const statusText = debts ? "Pendiente / adelantado" : used ? `Usado el ${item.usedOn}` : "Disponible";
     const cls = used ? " cl-list-item-used" : " cl-list-item-available";
-    return `<button type="button" class="cl-list-item${cls}" data-leave-date="${escapeHtml(item.date)}" aria-label="${escapeHtml(formatDate(item.date))}">
+    const statusText = debts ? "Pendiente / adelantado" : used ? `Usado el ${formatDate(item.usedOn)}` : "Disponible";
+    const statusClass = used ? "cl-used-label" : "cl-available-label";
+    const usedAttrs = used ? `data-used-date="${escapeHtml(item.usedOn)}"` : "";
+    return `<button type="button" class="cl-list-item${cls}" data-leave-date="${escapeHtml(item.date)}" ${usedAttrs} data-leave-id="${escapeHtml(item.id)}" aria-label="${escapeHtml(formatDate(item.date))}">
       <span class="cl-list-dot"></span>
-      <span><span class="cl-list-title">${escapeHtml(formatDate(item.date))}</span><span class="cl-list-meta ${used ? "cl-used-label" : "cl-available-label"}">${escapeHtml(statusText)}</span></span>
+      <span class="cl-list-content">
+        <span class="cl-list-title">${escapeHtml(formatDate(item.date))}</span>
+        <span class="cl-list-meta ${statusClass}">${escapeHtml(statusText)}</span>
+      </span>
       <span>›</span>
     </button>`;
   }).join("") : `<div class="cl-note">No hay registros.</div>`;
 
   openModal(`${modalHead(title)}
     <div class="cl-list">${listHtml}</div>
-    <div class="cl-note">Doble toque sobre un día para ir a ese día en el calendario.</div>`);
+    <div class="cl-note">Doble toque sobre un disponible para ir a la fecha generada. Doble toque sobre un usado para ver las fechas generada y usada.</div>`);
 
   document.querySelectorAll("[data-leave-date]").forEach(button => {
-    let lastTap = 0;
-    button.addEventListener("click", () => {
-      const now = Date.now();
-      if (now - lastTap < 420) {
-        const dateKey = button.dataset.leaveDate;
-        const date = dateFromKey(dateKey);
-        view.screen = "calendar";
-        view.year = date.getFullYear();
-        view.month = date.getMonth();
-        view.selected = dateKey;
-        closeModal();
-        render();
-        lastTap = 0;
+    bindDoubleTap(button, () => {
+      const item = sorted.find(x => x.id === button.dataset.leaveId);
+      if (!item) return;
+      if (!debts && item.status === "usado" && item.usedOn) {
+        openLeaveDateDetail(item);
       } else {
-        lastTap = now;
+        goToCalendarDate(item.date);
       }
     });
   });

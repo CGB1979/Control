@@ -188,3 +188,10 @@ button { -webkit-tap-highlight-color: transparent; }
 .cl-list-item-used .cl-list-meta { color: #9aa2ab; }
 .cl-list-item-available .cl-list-dot { background: var(--cl-success); }
 .cl-available-label { color: var(--cl-success) !important; font-weight: 750; }
+
+.cl-list-content { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.cl-detail-date { width: 100%; border: 1px solid var(--cl-border); background: white; border-radius: 14px; padding: 13px; text-align: left; display: flex; flex-direction: column; gap: 4px; margin-bottom: 9px; }
+.cl-detail-date:active { transform: scale(.99); }
+.cl-detail-label { font-size: 11px; color: var(--cl-muted); font-weight: 750; text-transform: uppercase; letter-spacing: .03em; }
+.cl-detail-date strong { font-size: 14px; }
+.cl-detail-hint { font-size: 11px; color: var(--cl-muted); }
