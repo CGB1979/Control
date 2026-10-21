@@ -1,0 +1,10 @@
+{
+  "name": "Control Laboral",
+  "short_name": "Control Laboral",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f6f8fb",
+  "theme_color": "#ffffff",
+  "lang": "es-AR",
+  "description": "Control personal de jornadas, horarios, horas extras y francos."
+}
