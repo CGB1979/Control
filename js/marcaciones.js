@@ -1,9 +1,60 @@
-import {CONFIG} from "./config.js";import {redondearHora} from "./calculos.js";import {registrarHistorial} from "./storage.js";
-const ahora=()=>new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit",hour12:false});
-function dia(d,f){return d.dias[f]??=({fecha:f,entrada:{real:null,historial:[]},salida:{real:null,historial:[]},clasificacionSabado:null,francoAplicado:false,medioFrancoAplicado:false,feriadoNoTrabajo:false,empresaReconoceFeriado:null,incidencias:[]})}
-export const obtenerDia=dia;
-function campo(old,h,t){return{real:h,referencia:redondearHora(h,t==="entrada"?CONFIG.redondeoEntradaMinutos:CONFIG.redondeoSalidaMinutos),historial:[...(old?.historial||[]),{hora:h,fecha:new Date().toISOString(),accion:old?.real?"corrección":"registro"}]}}
-export function registrarMarcacion(d,f,t,h=ahora()){const x=dia(d,f);if(x[t]?.real)return{ok:false,mensaje:`Ya existe una ${t}.`};x[t]=campo(x[t],h,t);registrarHistorial(d,"marcacion",`${t} registrada el ${f} a las ${h}.`);return{ok:true,hora:h}}
-export function corregirMarcacion(d,f,t,h){const x=dia(d,f),old=x[t]?.real||"sin valor";x[t]=campo(x[t],h,t);registrarHistorial(d,"correccion",`${t} de ${f}: ${old} → ${h}.`);return{ok:true}}
-export function eliminarMarcaciones(d,f){const x=dia(d,f);x.entrada={real:null,historial:[]};x.salida={real:null,historial:[]};registrarHistorial(d,"eliminacion-marcaciones",`Marcaciones eliminadas del ${f}.`)}
-export function detectarPosibleTarde(d,f){const x=d.dias[f];if(!x?.entrada?.real)return null;const xs=Object.values(d.dias).filter(y=>y.fecha!==f&&y.entrada?.real).slice(-30).map(y=>{const [h,m]=y.entrada.real.split(":").map(Number);return h*60+m}).sort((a,b)=>a-b);if(xs.length<CONFIG.minimoMuestrasTurno)return null;const habitual=xs[Math.floor(xs.length/2)],actual=x.entrada.real.split(":").map(Number);const am=actual[0]*60+actual[1],dif=am-habitual;if(dif<=0||dif>CONFIG.margenLlegadaTardeMinutos)return null;return{habitual:`${String(Math.floor(habitual/60)).padStart(2,"0")}:${String(habitual%60).padStart(2,"0")}`,real:x.entrada.real,diferencia:dif}}
+import { pushHistory } from "./storage.js";
+import { minutesFromTime, timeFromMinutes } from "./utils.js";
+import { CONFIG } from "./config.js";
+
+export function registerCurrentTime(state,key,type) {
+  const time=new Intl.DateTimeFormat("es-AR",{hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date());
+  return registerTime(state,key,type,time,false);
+}
+
+export function registerTime(state,key,type,time,isManual=true) {
+  if(!/^\d{2}:\d{2}$/.test(time)) throw new Error("Hora inválida.");
+  const [h,m]=time.split(":").map(Number);
+  if(h>23||m>59) throw new Error("Hora inválida.");
+  if(!state.records[key]) state.records[key]={};
+  const old=state.records[key][type]||null;
+  state.records[key][type]=time;
+  state.records[key].updatedAt=new Date().toISOString();
+  pushHistory(state,{
+    type:isManual?"manual-time":"time",
+    date:key,
+    field:type,
+    oldValue:old,
+    newValue:time
+  });
+  return time;
+}
+
+export function clearTime(state,key,type) {
+  if(!state.records[key]) return;
+  const old=state.records[key][type]||null;
+  delete state.records[key][type];
+  pushHistory(state,{type:"clear-time",date:key,field:type,oldValue:old});
+}
+
+export function suggestReferenceEntry(state, beforeDateKey) {
+  const keys=Object.keys(state.records).filter(k=>k<beforeDateKey).sort().reverse().slice(0,12);
+  const mins=[];
+  for(const key of keys){
+    const t=state.records[key]?.entry;
+    if(t) mins.push(minutesFromTime(t));
+  }
+  if(mins.length<3) return null;
+  mins.sort((a,b)=>a-b);
+  return timeFromMinutes(mins[Math.floor(mins.length/2)]);
+}
+
+export function getShiftStatus(state,key) {
+  const entry=state.records[key]?.entry;
+  if(!entry) return {status:"none"};
+  const reference=suggestReferenceEntry(state,key);
+  if(!reference) return {status:"unknown"};
+  const delta=minutesFromTime(entry)-minutesFromTime(reference);
+  if(delta>0 && delta<=CONFIG.MARGEN_LLEGADA_TARDE_MINUTOS) {
+    return {status:"possible-late",reference,delta};
+  }
+  if(delta>CONFIG.MARGEN_LLEGADA_TARDE_MINUTOS) {
+    return {status:"possible-shift-or-late",reference,delta};
+  }
+  return {status:"normal",reference,delta};
+}

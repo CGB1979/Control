@@ -1,80 +1,124 @@
-import {feriadoDe} from "./feriados.js";
-import {calcularDia} from "./calculos.js";
+import { getDateKey, formatDateLong, getMonthLabel, isSameDay } from "./utils.js";
 
-export const claveFecha=f=>`${f.getFullYear()}-${String(f.getMonth()+1).padStart(2,"0")}-${String(f.getDate()).padStart(2,"0")}`;
+let lastTapAt = 0;
+let lastTapKey = null;
 
-// El período laboral siempre va del día 25 al 24 del mes siguiente.
-export function inicioCicloDeFecha(fecha){
-  const f=new Date(fecha);
-  return f.getDate()>=25
-    ? new Date(f.getFullYear(),f.getMonth(),25,12)
-    : new Date(f.getFullYear(),f.getMonth()-1,25,12);
-}
-export function finCicloDeFecha(fecha){
-  const inicio=inicioCicloDeFecha(fecha);
-  return new Date(inicio.getFullYear(),inicio.getMonth()+1,24,12);
-}
-export function diasDelCiclo(fechaVista){
-  const inicio=inicioCicloDeFecha(fechaVista),fin=finCicloDeFecha(fechaVista),dias=[];
-  for(let d=new Date(inicio);d<=fin;d.setDate(d.getDate()+1))dias.push(new Date(d));
-  return {inicio,fin,dias};
-}
-export function tituloCiclo(fechaVista){
-  const {inicio,fin}=diasDelCiclo(fechaVista);
-  const fmt=new Intl.DateTimeFormat("es-AR",{day:"numeric",month:"long",year:"numeric"});
-  return `${fmt.format(inicio)} — ${fmt.format(fin)}`;
-}
+export function renderCalendar({year, month, state, selectedDate, onSingleTap, onDoubleTap}) {
+  const grid = document.getElementById("calendar-grid");
+  const title = document.getElementById("calendar-title");
+  title.textContent = getMonthLabel(year, month);
 
-export function renderCalendario({contenedor,fechaVista,datos,fechaSeleccionada,onSeleccionar,onDobleToque}){
-  contenedor.innerHTML="";
-  const {inicio,fin,dias}=diasDelCiclo(fechaVista),hoy=claveFecha(new Date());
-  // El ciclo siempre se dibuja completo. La grilla se ajusta a 5 filas (35 celdas).
-  const inicioSemana=(inicio.getDay()+6)%7;
-  const celdas=Math.ceil((inicioSemana+dias.length)/7)*7;
+  grid.innerHTML = "";
 
-  for(let i=0;i<celdas;i++){
-    const f=i<inicioSemana
-      ? new Date(inicio.getFullYear(),inicio.getMonth(),inicio.getDate()-(inicioSemana-i),12)
-      : i-inicioSemana<dias.length
-        ? new Date(dias[i-inicioSemana])
-        : new Date(fin.getFullYear(),fin.getMonth(),fin.getDate()+(i-inicioSemana-dias.length+1),12);
-    const key=claveFecha(f),d=datos.dias[key],fer=feriadoDe(datos,key),c=f.getDay(),calc=d?calcularDia(d):null;
-    const b=document.createElement("button");
-    b.type="button";b.className="cl-day";
-    if(f<inicio||f>fin)b.classList.add("is-outside");
-    if(key===fechaSeleccionada)b.classList.add("is-selected");
-    if(key===hoy)b.classList.add("is-today");
-    if(c===0)b.classList.add("is-sunday");
-    if(c===6&&d?.clasificacionSabado==="obligatorio")b.classList.add("is-saturday-obligatory");
-    if(c===6&&d?.clasificacionSabado==="voluntario")b.classList.add("is-saturday-voluntary");
-    if(c===6&&d?.medioFrancoGenerado)b.classList.add("is-saturday-voluntary");
-    if(calc?.revision)b.classList.add("is-review");
-    if(fer)b.classList.add("is-holiday");
-    b.dataset.fecha=key;
-    b.innerHTML=`<span class="cl-day-number">${f.getDate()}</span>${f.getMonth()!==inicio.getMonth()&&f.getDate()===1?`<span class="cl-month-mark">${new Intl.DateTimeFormat("es-AR",{month:"short"}).format(f)}</span>`:""}${fer?`<span class="cl-day-label">${fer.nombre}</span>`:""}${d?.entrada?.real||d?.salida?.real?`<div class="cl-day-times">${d.entrada?.real||"—"} → ${d.salida?.real||"—"}</div>`:""}<div class="cl-day-badges">${d?.francoAplicado?'<span class="cl-mini-badge">FRANCO</span>':''}${d?.medioFrancoAplicado?'<span class="cl-mini-badge">½ FRANCO</span>':''}${d?.medioFrancoGenerado?'<span class="cl-mini-badge">+½</span>':''}${d?.francoGenerado?'<span class="cl-mini-badge">+FRANCO</span>':''}${calc?.extra50?'<span class="cl-mini-badge">50%</span>':''}${calc?.extra100?'<span class="cl-mini-badge">100%</span>':''}${calc?.revision?'<span class="cl-mini-badge">REVISAR</span>':''}</div>`;
-    contenedor.appendChild(b);
+  const first = new Date(year, month, 1);
+  const firstMondayIndex = (first.getDay() + 6) % 7;
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const prevMonthDays = new Date(year, month, 0).getDate();
+  const totalCells = Math.ceil((firstMondayIndex + daysInMonth) / 7) * 7;
+
+  for (let i = 0; i < totalCells; i++) {
+    const offset = i - firstMondayIndex;
+    const date = new Date(year, month, offset + 1);
+    const key = getDateKey(date);
+    const inMonth = date.getMonth() === month;
+    const weekday = date.getDay();
+    const record = state.records[key];
+    const adjustment = state.dayAdjustments[key] || {};
+    const holiday = state.holidays[key];
+    const day = document.createElement("button");
+    day.type = "button";
+    day.className = "cl-day";
+    day.dataset.date = key;
+
+    if (!inMonth) day.classList.add("is-other-month");
+    if (isSameDay(date, new Date())) day.classList.add("is-today");
+    if (selectedDate && key === getDateKey(selectedDate)) day.classList.add("is-selected");
+    if (weekday === 0) day.classList.add("is-sunday");
+    if (holiday) day.classList.add("is-holiday");
+    if (adjustment.saturdayClass === "required") day.classList.add("is-required");
+    if (adjustment.saturdayClass === "voluntary") day.classList.add("is-voluntary");
+    if (adjustment.review) day.classList.add("is-review");
+
+    const number = document.createElement("span");
+    number.className = "cl-day-number";
+    number.textContent = String(date.getDate());
+    day.appendChild(number);
+
+    if (adjustment.saturdayClass === "required") {
+      day.appendChild(label("Sábado obligatorio"));
+    } else if (adjustment.saturdayClass === "voluntary") {
+      day.appendChild(label("Sábado voluntario"));
+    } else if (holiday) {
+      day.appendChild(label("Feriado"));
+    } else if (weekday === 0) {
+      day.appendChild(label("Domingo"));
+    } else if (record?.entry || record?.exit) {
+      day.appendChild(label("Registrado"));
+    }
+
+    if (record?.entry || record?.exit) {
+      const hours = document.createElement("span");
+      hours.className = "cl-day-hours";
+      hours.textContent = shortHours(record);
+      day.appendChild(hours);
+    }
+
+    const marker = document.createElement("i");
+    marker.className = "cl-day-marker";
+    if (adjustment.review) marker.classList.add("marker-review");
+    else if (adjustment.saturdayClass === "required") marker.classList.add("marker-required");
+    else if (adjustment.saturdayClass === "voluntary") marker.classList.add("marker-voluntary");
+    else if (holiday || weekday === 0) marker.classList.add("marker-holiday");
+    else if (record?.entry || record?.exit) marker.classList.add("marker-record");
+    else marker.remove();
+    if (marker.isConnected !== false) day.appendChild(marker);
+
+    grid.appendChild(day);
   }
 
-  // Pointer events permiten mouse, touch y stylus con la misma lógica.
-  let ultimoToque=0,ultimaFecha="",timer=null;
-  const dobleVentana=500;
-  const procesarToque=e=>{
-    const b=e.target.closest(".cl-day");
-    if(!b||!contenedor.contains(b))return;
-    if(e.pointerType==="mouse"&&e.button!==0)return;
-    e.preventDefault();
-    const key=b.dataset.fecha,ahora=Date.now();
-    const esDoble=key===ultimaFecha&&(ahora-ultimoToque)<=dobleVentana;
-    clearTimeout(timer);
-    if(esDoble){
-      ultimoToque=0;ultimaFecha="";
-      onDobleToque(key);
-      return;
-    }
-    ultimaFecha=key;ultimoToque=ahora;
-    timer=setTimeout(()=>{
-      if(ultimaFecha===key){onSeleccionar(key);ultimaFecha="";ultimoToque=0}
-    },dobleVentana);
-  };
-  contenedor.onpointerup=procesarToque;
+  // Un solo listener sobre el contenedor. Así un rerender del mes no
+  // destruye el estado necesario para detectar el segundo toque.
+  if (!grid.dataset.touchHandlerInstalled) {
+    grid.addEventListener("pointerup", (event) => {
+      if (event.pointerType === "mouse" && event.button !== 0) return;
+      const cell = event.target.closest(".cl-day");
+      if (!cell || !grid.contains(cell)) return;
+      const key = cell.dataset.date;
+      const now = performance.now();
+      const delta = now - lastTapAt;
+      event.preventDefault();
+
+      if (key === lastTapKey && delta > 0 && delta < 380) {
+        lastTapAt = 0;
+        lastTapKey = null;
+        onDoubleTap(parseDateKeyLocal(key));
+      } else {
+        lastTapAt = now;
+        lastTapKey = key;
+        onSingleTap(parseDateKeyLocal(key));
+      }
+    }, {passive:false});
+    grid.dataset.touchHandlerInstalled = "true";
+  }
+
+  function parseDateKeyLocal(key) {
+    const [y,m,d] = key.split("-").map(Number);
+    return new Date(y,m-1,d);
+  }
+}
+
+function label(text) {
+  const span = document.createElement("span");
+  span.className = "cl-day-label";
+  span.textContent = text;
+  return span;
+}
+
+function shortHours(record) {
+  if (!record?.entry || !record?.exit) return "";
+  const a = new Date(`1970-01-01T${record.entry}:00`);
+  const b = new Date(`1970-01-01T${record.exit}:00`);
+  let diff = (b-a)/3600000;
+  if (diff < 0) diff += 24;
+  return `${Math.floor(diff)}h${Math.round((diff%1)*60).toString().padStart(2,"0")}`;
 }

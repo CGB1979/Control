@@ -1,12 +1,86 @@
-const KEY="control-laboral-datos-v2",VERSION=2; let memoria=null;
-const inicial=()=>({version:VERSION,dias:{},francos:[],mediosFrancos:[],deudas:[],historial:[],feriados:{fechas:{},ultimaActualizacion:null},configuracion:{},preferencias:{}});
-const clone=o=>JSON.parse(JSON.stringify(o));
-export function normalizarDatos(d){if(!d||typeof d!=="object")return inicial();return{...inicial(),...d,version:VERSION,dias:d.dias&&typeof d.dias==="object"?d.dias:{},francos:Array.isArray(d.francos)?d.francos:[],mediosFrancos:Array.isArray(d.mediosFrancos)?d.mediosFrancos:[],deudas:Array.isArray(d.deudas)?d.deudas:[],historial:Array.isArray(d.historial)?d.historial:[],feriados:{fechas:d.feriados?.fechas||{},ultimaActualizacion:d.feriados?.ultimaActualizacion||null}}}
-export function cargarDatos(){if(memoria)return clone(memoria);try{const r=localStorage.getItem(KEY);memoria=normalizarDatos(r?JSON.parse(r):inicial())}catch(e){console.error(e);memoria=inicial()}return clone(memoria)}
-export function guardarDatos(d){memoria=normalizarDatos(d);const c=clone(memoria);localStorage.setItem(KEY,JSON.stringify(c));guardarIDB(c).catch(console.warn);return c}
-function db(){return new Promise((res,rej)=>{if(!indexedDB)return rej(Error("IndexedDB no disponible"));const r=indexedDB.open("control-laboral-db",1);r.onupgradeneeded=()=>r.result.createObjectStore("estado");r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
-async function guardarIDB(d){const x=await db();await new Promise((res,rej)=>{const t=x.transaction("estado","readwrite");t.objectStore("estado").put(d,"principal");t.oncomplete=res;t.onerror=()=>rej(t.error)});x.close()}
-export async function recuperarDesdeIndexedDB(){try{const x=await db();const d=await new Promise((res,rej)=>{const r=x.transaction("estado").objectStore("estado").get("principal");r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});x.close();return d?normalizarDatos(d):null}catch{return null}}
-export function registrarHistorial(d,t,detalle){d.historial.unshift({id:crypto.randomUUID(),fecha:new Date().toISOString(),tipo:t,detalle});d.historial=d.historial.slice(0,500)}
-export function validarRespaldo(d){return !!d&&typeof d==="object"&&d.version===2&&d.dias&&Array.isArray(d.francos)&&Array.isArray(d.mediosFrancos)&&Array.isArray(d.deudas)}
-export function exportarJSON(d){const b=new Blob([JSON.stringify(d,null,2)],{type:"application/json"}),u=URL.createObjectURL(b),a=document.createElement("a");a.href=u;a.download=`control-laboral-respaldo-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(u)}
+const STORAGE_KEY = "mi-control-laboral-v1";
+
+const EMPTY = {
+  version: 1,
+  records: {},
+  dayAdjustments: {},
+  holidays: {},
+  holidayMeta: { lastUpdate: null, years: [] },
+  dayOffCredits: [],
+  halfDayCredits: [],
+  debts: [],
+  history: [],
+  settings: {},
+  preferences: {}
+};
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+export function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return clone(EMPTY);
+    const parsed = JSON.parse(raw);
+    return normalizeState(parsed);
+  } catch (error) {
+    console.error("No se pudo leer el almacenamiento local:", error);
+    return clone(EMPTY);
+  }
+}
+
+export function saveState(state) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (error) {
+    console.error("No se pudo guardar el almacenamiento local:", error);
+    throw new Error("No se pudo guardar la información en el navegador.");
+  }
+}
+
+export function normalizeState(state) {
+  const result = { ...clone(EMPTY), ...(state || {}) };
+  result.records = result.records && typeof result.records === "object" ? result.records : {};
+  result.dayAdjustments = result.dayAdjustments && typeof result.dayAdjustments === "object" ? result.dayAdjustments : {};
+  result.holidays = result.holidays && typeof result.holidays === "object" ? result.holidays : {};
+  result.holidayMeta = result.holidayMeta || clone(EMPTY.holidayMeta);
+  result.dayOffCredits = Array.isArray(result.dayOffCredits) ? result.dayOffCredits : [];
+  result.halfDayCredits = Array.isArray(result.halfDayCredits) ? result.halfDayCredits : [];
+  result.debts = Array.isArray(result.debts) ? result.debts : [];
+  result.history = Array.isArray(result.history) ? result.history : [];
+  result.settings = result.settings && typeof result.settings === "object" ? result.settings : {};
+  return result;
+}
+
+export function exportState(state) {
+  const blob = new Blob([JSON.stringify(state, null, 2)], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `control-laboral-respaldo-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function importState(file) {
+  const text = await file.text();
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || !parsed.version || !parsed.records) {
+    throw new Error("El archivo no parece ser un respaldo válido.");
+  }
+  return normalizeState(parsed);
+}
+
+export function pushHistory(state, item) {
+  state.history.unshift({
+    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
+    at: new Date().toISOString(),
+    ...item
+  });
+  if (state.history.length > 500) state.history.length = 500;
+}
+
+export function createId(prefix="id") {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
+}

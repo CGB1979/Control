@@ -1,4 +1,32 @@
-const API="https://api.argentinadatos.com/v1/feriados";
-export async function actualizarFeriados(d,a){try{const r=await fetch(`${API}/${a}`,{cache:"no-store"});if(!r.ok)throw Error(`HTTP ${r.status}`);const xs=await r.json();if(!Array.isArray(xs))throw Error("Respuesta inválida");xs.forEach(x=>{if(x.fecha)d.feriados.fechas[x.fecha]={fecha:x.fecha,tipo:x.tipo||"desconocido",nombre:x.nombre||"Feriado",fuente:"API"}});d.feriados.ultimaActualizacion=new Date().toISOString();return{ok:true,cantidad:xs.length}}catch(error){console.warn("Feriados:",error);return{ok:false,error}}}
-export const feriadoDe=(d,f)=>d.feriados?.fechas?.[f]||null;
-export const formatearActualizacion=d=>d.feriados?.ultimaActualizacion?`Última actualización de feriados: ${new Date(d.feriados.ultimaActualizacion).toLocaleString("es-AR")}`:"Todavía no hay una actualización de feriados guardada.";
+import { CONFIG } from "./config.js";
+
+export async function loadHolidaysForYear(state,year) {
+  const cachedYear=state.holidayMeta?.years?.includes(year);
+  if(cachedYear) return {ok:true,fromCache:true};
+
+  try {
+    const response=await fetch(`${CONFIG.FERIADOS_API}/${year}`,{cache:"no-store"});
+    if(!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data=await response.json();
+    if(!Array.isArray(data)) throw new Error("Formato de feriados inesperado.");
+
+    for(const item of data){
+      if(!item?.fecha) continue;
+      state.holidays[item.fecha]={
+        name:item.nombre||"Feriado",
+        type:item.tipo||"",
+        paidByCompany:false,
+        companyConfirmed:false
+      };
+    }
+    if(!state.holidayMeta) state.holidayMeta={lastUpdate:null,years:[]};
+    state.holidayMeta.lastUpdate=new Date().toISOString();
+    state.holidayMeta.years=Array.from(new Set([...(state.holidayMeta.years||[]),year]));
+    return {ok:true,fromCache:false};
+  } catch(error) {
+    console.warn("No se pudieron actualizar feriados:",error);
+    return {ok:false,error};
+  }
+}
+
+export function getHoliday(state,key){ return state.holidays[key]||null; }

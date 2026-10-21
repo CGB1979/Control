@@ -1,50 +1,315 @@
-import {CONFIG} from "./config.js";import {cargarDatos,guardarDatos,registrarHistorial,validarRespaldo,exportarJSON,recuperarDesdeIndexedDB} from "./storage.js";import {renderCalendario,claveFecha,inicioCicloDeFecha,finCicloDeFecha,tituloCiclo} from "./calendar.js";import {calcularDia,formatearHoras} from "./calculos.js";import {registrarMarcacion,corregirMarcacion,eliminarMarcaciones,obtenerDia,detectarPosibleTarde} from "./marcaciones.js";import {generarFranco,generarMedioFranco,usarFrancoFIFO,usarMedioFIFO,usarTresMediosFIFO,registrarDeudaFranco,resumenFrancos} from "./francos.js";import {actualizarFeriados,feriadoDe,formatearActualizacion} from "./feriados.js";import {qs,abrirModal,cerrarModal,toast,escapeHtml,formatearFecha} from "./ui.js";
-let datos=cargarDatos(),vista=inicioCicloDeFecha(new Date()),seleccion=claveFecha(new Date()),corTipo=null,corFecha=null;const estado=qs("#estadoGuardado");
-sincronizarCompensaciones();
-inicio();
-async function inicio(){const idb=await recuperarDesdeIndexedDB();if(idb&&(idb.historial?.length||0)>(datos.historial?.length||0)){datos=idb;guardarDatos(datos)}sincronizarCompensaciones();eventos();renderTodo();pwa();const r=await actualizarFeriados(datos,new Date().getFullYear());if(r.ok){guardar();renderTodo()}else qs("#estadoFeriados").textContent=formatearActualizacion(datos)}
-function sincronizarCompensaciones(){
-  let cambio=false;
-  for(const d of Object.values(datos.dias)){
-    if(!d?.fecha)continue;
-    const f=new Date(`${d.fecha}T12:00:00`),diaSemana=f.getDay(),trabajo=!!(d.entrada?.real||d.salida?.real);
-    if(diaSemana===6){
-      const x=datos.mediosFrancos.find(x=>x.fechaTrabajo===d.fecha&&x.estado!=="anulado");
-      if(trabajo&&!x){generarMedioFranco(datos,d.fecha,"Sábado trabajado");d.medioFrancoGenerado=true;d.compensacionGenerada=true;cambio=true}
-      if(!trabajo&&x&&x.estado==="disponible"){x.estado="anulado";d.medioFrancoGenerado=false;d.compensacionGenerada=false;registrarHistorial(datos,"medio-franco-anulado",`Medio franco de ${d.fecha} anulado porque se eliminaron las marcaciones.`);cambio=true}
-    }else if(diaSemana===0){
-      const x=datos.francos.find(x=>x.fechaTrabajo===d.fecha&&x.estado!=="anulado");
-      if(trabajo&&!x){generarFranco(datos,d.fecha,"Domingo trabajado");d.francoGenerado=true;d.compensacionGenerada=true;cambio=true}
-      if(!trabajo&&x&&x.estado==="disponible"){x.estado="anulado";d.francoGenerado=false;d.compensacionGenerada=false;registrarHistorial(datos,"franco-anulado",`Franco de ${d.fecha} anulado porque se eliminaron las marcaciones.`);cambio=true}
+import { CONFIG } from "./config.js";
+import { loadState, saveState, exportState, importState, pushHistory } from "./storage.js";
+import { renderCalendar } from "./calendar.js";
+import { calculatePeriod, classifySaturdays } from "./calculos.js";
+import { registerCurrentTime, registerTime, clearTime } from "./marcaciones.js";
+import { loadHolidaysForYear } from "./feriados.js";
+import { syncGeneratedCredits, useFullCredit, useHalfCredit, useThreeHalfCredits, authorizeDebt } from "./francos.js";
+import { renderDayModal, renderEditDayModal, renderSummary, renderHistory, fillSettings, showToast, openModal, closeAllModals } from "./ui.js";
+import { getDateKey, parseDateKey, billingPeriodFor, billingPeriodLabel } from "./utils.js";
+
+let state=loadState();
+let viewDate=new Date();
+let selectedDate=new Date();
+let pendingTriple={key:null,type:null,count:0,last:0};
+
+function persist(){ saveState(state); refresh(); }
+
+function refresh(){
+  const period=billingPeriodFor(selectedDate);
+  document.getElementById("header-period").textContent=`Período: ${billingPeriodLabel(selectedDate)}`;
+  renderCalendar({
+    year:viewDate.getFullYear(),
+    month:viewDate.getMonth(),
+    state,
+    selectedDate,
+    onSingleTap:(date)=>{ selectedDate=date; renderCalendar({
+      year:viewDate.getFullYear(),month:viewDate.getMonth(),state,selectedDate,
+      onSingleTap:(d)=>{selectedDate=d;refreshCalendarOnly();},
+      onDoubleTap:openDay
+    }); },
+    onDoubleTap:openDay
+  });
+  renderSummary(state,period);
+  renderHistory(state);
+  fillSettings(state);
+}
+
+function refreshCalendarOnly(){
+  renderCalendar({
+    year:viewDate.getFullYear(),month:viewDate.getMonth(),state,selectedDate,
+    onSingleTap:(date)=>{selectedDate=date;refreshCalendarOnly();},
+    onDoubleTap:openDay
+  });
+}
+
+function openDay(date){
+  selectedDate=date;
+  openEditDay(date);
+}
+
+function openEditDay(date){
+  selectedDate=date;
+  renderEditDayModal({
+    date,
+    state,
+    onSave:(key)=>saveEditedDay(key),
+    onCancel:closeAllModals,
+    onAction:handleDayAction
+  });
+  openModal("edit-day-modal");
+}
+
+function saveEditedDay(key){
+  const entry=document.getElementById("edit-entry").value || null;
+  const exit=document.getElementById("edit-exit").value || null;
+
+  const valid=t=>!t || /^\d{2}:\d{2}$/.test(t);
+  if(!valid(entry) || !valid(exit)){
+    showToast("Ingresá horas válidas.");
+    return;
+  }
+
+  try{
+    if(entry) registerTime(state,key,"entry",entry,true);
+    else if(state.records[key]?.entry) clearTime(state,key,"entry");
+
+    if(exit) registerTime(state,key,"exit",exit,true);
+    else if(state.records[key]?.exit) clearTime(state,key,"exit");
+
+    const previous=state.dayAdjustments[key]||{};
+    const next={...previous};
+
+    if(parseDateKey(key).getDay()===6){
+      const sat=document.getElementById("edit-saturday-type");
+      if(sat){
+        if(sat.value) next.saturdayClass=sat.value;
+        else delete next.saturdayClass;
+      }
+    }
+
+    const holidaySelect=document.getElementById("edit-holiday-recognized");
+    if(holidaySelect) next.holidayRecognized=holidaySelect.value==="true";
+
+    const note=document.getElementById("edit-note").value.trim();
+    if(note) next.note=note; else delete next.note;
+
+    state.dayAdjustments[key]=next;
+    pushHistory(state,{type:"edit-day",date:key,entry,exit});
+    syncGeneratedCredits(state);
+    persist();
+    closeAllModals();
+    showToast("Día guardado correctamente.");
+  }catch(error){
+    showToast(error.message || "No se pudo guardar el día.");
+  }
+}
+
+function handleDayAction(action,key){
+  if(action==="entry"||action==="exit"){
+    const alreadyRegistered=!!state.records[key]?.[action];
+    const now=performance.now();
+
+    // Si ya existe una marcación, el botón queda "bloqueado" funcionalmente:
+    // no la pisa con otro toque. Tres toques rápidos abren corrección.
+    if(alreadyRegistered){
+      if(pendingTriple.key===key && pendingTriple.type===action && now-pendingTriple.last<900){
+        pendingTriple.count++;
+      } else {
+        pendingTriple={key,type:action,count:1,last:now};
+      }
+      pendingTriple.last=now;
+      if(pendingTriple.count>=3){
+        pendingTriple={key,type:action,count:0,last:0};
+        openCorrection(key,action);
+      } else {
+        showToast("Marcación ya registrada. Tres toques rápidos abren la corrección.");
+      }
+      return;
+    }
+
+    // Primera marcación: registra la hora real y después el botón queda
+    // protegido contra pulsaciones accidentales.
+    try {
+      registerCurrentTime(state,key,action);
+      syncGeneratedCredits(state);
+      persist();
+      openDay(parseDateKey(key));
+      showToast(`${action==="entry"?"Entrada":"Salida"} registrada.`);
+    }catch(e){showToast(e.message);}
+    return;
+  }
+
+  if(action==="unlock-entry"||action==="unlock-exit"){
+    const type=action==="unlock-entry"?"entry":"exit";
+    openCorrection(key,type);
+    return;
+  }
+
+  if(action==="halfday"){ openHalfday(key); return; }
+
+  if(action==="fullfranco"){
+    const result=useFullCredit(state,key);
+    if(result.ok){persist();openDay(parseDateKey(key));showToast("Franco entero aplicado.");}
+    else {
+      const ask=confirm(`${result.reason}\n\n¿Querés registrar el día como deuda autorizada?`);
+      if(ask){
+        const debt=authorizeDebt(state,key,"full");
+        if(debt.ok){persist();openDay(parseDateKey(key));showToast("Día registrado como deuda.");}
+      }
+    }
+    return;
+  }
+
+  if(action==="holiday-no-work"){
+    state.dayAdjustments[key]={...(state.dayAdjustments[key]||{}),holidayNoWork:true};
+    pushHistory(state,{type:"holiday-no-work",date:key});
+    persist();openDay(parseDateKey(key));showToast("Registrado como no trabajado por feriado.");
+    return;
+  }
+
+  if(action==="edit-note"){
+    const note=prompt("Nota para este día:",state.dayAdjustments[key]?.note||"");
+    if(note!==null){
+      state.dayAdjustments[key]={...(state.dayAdjustments[key]||{}),note};
+      pushHistory(state,{type:"note",date:key});
+      persist();openDay(parseDateKey(key));
     }
   }
-  if(cambio)guardarDatos(datos);
 }
-function seleccionarFecha(f){
-  seleccion=f;
-  const c=qs("#calendario");
-  c.querySelectorAll(".cl-day.is-selected").forEach(x=>x.classList.remove("is-selected"));
-  c.querySelector(`.cl-day[data-fecha="${f}"]`)?.classList.add("is-selected");
+
+function openCorrection(key,type){
+  const box=document.getElementById("correction-content");
+  box.innerHTML=`
+    <h2 class="cl-modal-title">Corregir hora de ${type==="entry"?"entrada":"salida"}</h2>
+    <p class="cl-modal-subtitle">La marcación anterior se conserva en el historial.</p>
+    <button class="cl-choice" data-correct="now">Usar hora actual<small>Registra la hora del teléfono ahora.</small></button>
+    <button class="cl-choice" data-correct="manual">Ingresar hora manualmente<small>Permite elegir una hora exacta.</small></button>
+  `;
+  box.querySelector("[data-correct=now]").onclick=()=>{
+    registerCurrentTime(state,key,type);persist();closeAllModals();openDay(parseDateKey(key));showToast("Hora corregida con la hora actual.");
+  };
+  box.querySelector("[data-correct=manual]").onclick=()=>openManualTime(key,type);
+  openModal("correction-modal");
 }
-function eventos(){document.querySelectorAll(".cl-tab").forEach(x=>x.onclick=()=>vistaTab(x.dataset.tab));qs("#btnMesAnterior").onclick=()=>mes(-1);qs("#btnMesSiguiente").onclick=()=>mes(1);qs("#btnMesActual").onclick=()=>{vista=inicioCicloDeFecha(new Date());seleccionarFecha(claveFecha(new Date()));cal()};qs("#btnHoy").onclick=()=>{const hoy=claveFecha(new Date());vista=inicioCicloDeFecha(new Date());seleccion=hoy;cal();abrirDia(seleccion)};qs("#btnEntrada").onclick=()=>marca("entrada");qs("#btnSalida").onclick=()=>marca("salida");qs("#btnGuardarDia").onclick=()=>{guardar();cerrarModal("modalDia");toast("Día guardado");cal()};qs("#btnEliminarDia").onclick=()=>{if(confirm("¿Eliminar las marcaciones y aplicaciones de este día?")){eliminarMarcaciones(datos,seleccion);sincronizarCompensaciones();const d=obtenerDia(datos,seleccion);d.francoAplicado=false;d.medioFrancoAplicado=false;d.feriadoNoTrabajo=false;guardar();renderTodo();abrirDia(seleccion)}};qs("#btnFranco").onclick=franco;qs("#btnMedioFranco").onclick=()=>abrirModal("modalMedioFranco");qs("#btnAplicarMedio").onclick=medio;qs("#btnCubrirDiaMedios").onclick=tresMedios;qs("#btnFeriadoNoTrabajo").onclick=()=>{const d=obtenerDia(datos,seleccion);d.feriadoNoTrabajo=true;guardar();abrirDia(seleccion);cal();toast("Registrado como no trabajado por feriado")};qs("#btnClasificacionSabado").onclick=clasifica;document.querySelectorAll("[data-close-modal]").forEach(x=>x.onclick=()=>cerrarModal("modalDia"));document.querySelectorAll("[data-close-correction]").forEach(x=>x.onclick=()=>cerrarModal("modalCorreccion"));document.querySelectorAll("[data-close-half]").forEach(x=>x.onclick=()=>cerrarModal("modalMedioFranco"));document.querySelectorAll("[data-close-holiday]").forEach(x=>x.onclick=()=>cerrarModal("modalFeriado"));document.querySelectorAll('input[name="modoCorreccion"]').forEach(x=>x.onchange=()=>qs("#campoHoraManual").hidden=x.value!=="manual"||!x.checked);qs("#btnAplicarCorreccion").onclick=corregir;qs("#btnFeriadoSi").onclick=()=>feriadoRespuesta(true);qs("#btnFeriadoNo").onclick=()=>feriadoRespuesta(false);qs("#btnExportar").onclick=()=>exportarJSON(datos);qs("#btnImportar").onclick=importar;qs("#btnActualizarResumen").onclick=resumen;qs("#btnGuardarConfig").onclick=configGuardar}
-function vistaTab(t){document.querySelectorAll(".cl-tab").forEach(x=>x.classList.toggle("is-active",x.dataset.tab===t));["calendario","resumen","datos","configuracion"].forEach(x=>qs(`#vista${x[0].toUpperCase()+x.slice(1)}`).hidden=x!==t);if(t==="resumen")resumen();if(t==="datos")datosUI();if(t==="configuracion")configUI()}
-function mes(n){vista=new Date(vista.getFullYear(),vista.getMonth()+n,25,12);cal()}
-function renderTodo(){cal();resumen();datosUI();configUI()}
-function cal(){qs("#tituloMes").textContent=tituloCiclo(vista).replace(/^./,c=>c.toUpperCase());renderCalendario({contenedor:qs("#calendario"),fechaVista:vista,datos,fechaSeleccionada:seleccion,onSeleccionar:seleccionarFecha,onDobleToque:f=>{seleccion=f;abrirDia(f)}})}
-function abrirDia(f){seleccion=f;const d=obtenerDia(datos,f),fer=feriadoDe(datos,f),week=new Date(`${f}T12:00:00`).getDay(),c=calcularDia(d);qs("#modalDiaTitulo").textContent=formatearFecha(f);qs("#modalDiaSubtitulo").textContent=fer?`FERIADO · ${fer.nombre}`:week===6?"SÁBADO":"JORNADA";qs("#horaEntrada").textContent=d.entrada?.real||"—";qs("#horaSalida").textContent=d.salida?.real||"—";qs("#btnEntrada").textContent=d.entrada?.real?"Corregir entrada":"Registrar entrada";qs("#btnSalida").textContent=d.salida?.real?"Corregir salida":"Registrar salida";qs("#btnFranco").disabled=d.francoAplicado;qs("#btnMedioFranco").disabled=d.medioFrancoAplicado;qs("#btnClasificacionSabado").hidden=week!==6;qs("#btnClasificacionSabado").textContent=`Sábado: ${d.clasificacionSabado||"provisional"}`;qs("#modalDiaEstado").innerHTML=`<strong>${escapeHtml(c.estado)}</strong>${c.motivo.length?`<br>${c.motivo.map(escapeHtml).join("<br>")}`:""}`;qs("#detalleCalculo").innerHTML=`<div class="cl-calc-row"><span>Horas reales</span><strong>${formatearHoras(c.minutosReales)}</strong></div><div class="cl-calc-row"><span>Horas de jornal</span><strong>${formatearHoras(c.minutosJornal)}</strong></div><div class="cl-calc-row"><span>Extras 50 %</span><strong>${formatearHoras(c.extra50)}</strong></div><div class="cl-calc-row"><span>Extras 100 %</span><strong>${formatearHoras(c.extra100)}</strong></div>`;const t=detectarPosibleTarde(datos,f),a=qs("#alertaInferencia");if(t){a.hidden=false;a.innerHTML=`<strong>Posible llegada tarde o cambio de turno.</strong><br>Habitual estimado: ${t.habitual}. Real: ${t.real}. Diferencia: ${t.diferencia} min.<div class="cl-action-grid"><button id="btnTarde" class="cl-secondary-btn">Fue llegada tarde</button><button id="btnCambioTurno" class="cl-secondary-btn">Cambió el turno</button></div>`;qs("#btnTarde").onclick=()=>incidencia("llegada-tarde");qs("#btnCambioTurno").onclick=cambioTurno}else{a.hidden=true;a.innerHTML=""}abrirModal("modalDia")}
-function marca(t){const d=obtenerDia(datos,seleccion);if(d[t]?.real){corTipo=t;corFecha=seleccion;qs("#correccionTitulo").textContent=`Corregir ${t}`;qs("#inputHoraManual").value=d[t].real;qs('input[name="modoCorreccion"][value="ahora"]').checked=true;qs("#campoHoraManual").hidden=true;abrirModal("modalCorreccion");return}const r=registrarMarcacion(datos,seleccion,t);if(!r.ok)return toast(r.mensaje);sincronizarCompensaciones();guardar();abrirDia(seleccion);cal();toast(`${t==="entrada"?"Entrada":"Salida"} registrada a las ${r.hora}`)}
-function corregir(){const modo=document.querySelector('input[name="modoCorreccion"]:checked').value,h=modo==="manual"?qs("#inputHoraManual").value:new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit",hour12:false});if(!h)return toast("Hora no válida");corregirMarcacion(datos,corFecha,corTipo,h);sincronizarCompensaciones();guardar();cerrarModal("modalCorreccion");abrirDia(corFecha);cal();toast("Corrección guardada; el historial se conserva")}
-function franco(){const r=usarFrancoFIFO(datos,seleccion);if(!r.ok){if(confirm(`${r.mensaje}\n\n¿Registrar deuda autorizada?`)){registrarDeudaFranco(datos,seleccion,"franco-entero","Día completo autorizado sin franco disponible");guardar();toast("Deuda registrada")};return}obtenerDia(datos,seleccion).francoAplicado=true;guardar();renderTodo();abrirDia(seleccion);toast("Franco aplicado FIFO")}
-function medio(){const r=usarMedioFIFO(datos,seleccion);if(!r.ok){if(confirm(`${r.mensaje}\n\n¿Registrar deuda de jornada de 4 horas?`)){registrarDeudaFranco(datos,seleccion,"medio-franco","Jornada reducida autorizada sin medio franco disponible");guardar();cerrarModal("modalMedioFranco");toast("Deuda registrada")};return}obtenerDia(datos,seleccion).medioFrancoAplicado=true;guardar();cerrarModal("modalMedioFranco");renderTodo();abrirDia(seleccion);toast("Medio franco aplicado FIFO")}
-function tresMedios(){const r=usarTresMediosFIFO(datos,seleccion);if(!r.ok)return toast(r.mensaje);const d=obtenerDia(datos,seleccion);d.francoAplicado=true;d.medioFrancoAplicado=true;guardar();cerrarModal("modalMedioFranco");renderTodo();abrirDia(seleccion);toast("Día cubierto con 3 medios francos")}
-function incidencia(tipo){const d=obtenerDia(datos,seleccion);d.incidencias??=[];if(!d.incidencias.includes(tipo))d.incidencias.push(tipo);guardar();abrirDia(seleccion);toast(tipo==="llegada-tarde"?"Marcado como llegada tarde":"Marcado como cambio de turno")}
-function cambioTurno(){const h=prompt("Nuevo horario habitual de entrada (HH:MM)");if(!h||!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(h))return toast("Hora no válida");const d=obtenerDia(datos,seleccion);d.incidencias??=[];d.incidencias.push("cambio-turno");d.turnoProvisional={horaEntrada:h,desde:seleccion};guardar();abrirDia(seleccion);toast(`Turno provisional: ${h}`)}
-function clasifica(){const d=obtenerDia(datos,seleccion);d.clasificacionSabado=d.clasificacionSabado==="obligatorio"?"voluntario":"obligatorio";registrarHistorial(datos,"clasificacion-sabado",`${seleccion}: ${d.clasificacionSabado}`);guardar();renderTodo();abrirDia(seleccion)}
-function feriadoRespuesta(v){obtenerDia(datos,seleccion).empresaReconoceFeriado=v;guardar();cerrarModal("modalFeriado");abrirDia(seleccion);cal()}
-function resumen(){const {inicio,fin}= {inicio:inicioCicloDeFecha(vista),fin:finCicloDeFecha(vista)};const dentroDelCiclo=f=>f>=claveFecha(inicio)&&f<=claveFecha(fin);let n=0,r=0,j=0,e50=0,e100=0,rev=0,ft=0,fn=0;Object.values(datos.dias).filter(d=>dentroDelCiclo(d.fecha)).forEach(d=>{const c=calcularDia(d);r+=c.minutosReales;j+=c.minutosJornal;e50+=c.extra50;e100+=c.extra100;if(c.revision)rev++;if(c.minutosJornal>=CONFIG.jornalNormalHoras*60)n++;if(feriadoDe(datos,d.fecha)){if(c.minutosReales)ft++;else if(d.feriadoNoTrabajo)fn++}});const f=resumenFrancos(datos);qs("#tituloResumen").textContent=tituloCiclo(vista);const xs=[["Jornales normales",n],["Horas reales",formatearHoras(r)],["Horas de jornal",formatearHoras(j)],["Extras 50 %",formatearHoras(e50)],["Extras 100 %",formatearHoras(e100)],["Para revisar",rev],["Feriados trabajados",ft],["Feriados no trabajados",fn]];qs("#resumenGrid").innerHTML=xs.map(x=>`<div class="cl-summary-card"><span>${escapeHtml(x[0])}</span><strong>${escapeHtml(x[1])}</strong></div>`).join("");const inc=Object.values(datos.dias).filter(d=>dentroDelCiclo(d.fecha)&&(d.incidencias?.length||calcularDia(d).revision));qs("#listaIncidencias").innerHTML=inc.length?inc.map(d=>`<div class="cl-list-item"><span>${d.fecha}</span><strong>Revisar</strong></div>`).join(""):`<div class="cl-list-item"><span>Sin incidencias pendientes.</span></div>`;qs("#resumenFrancos").innerHTML=`<div class="cl-list-item"><span>Francos enteros</span><strong>${f.enterosUsados} usados · ${f.enterosDisponibles} disponibles</strong></div><div class="cl-list-item"><span>Medios francos</span><strong>${f.mediosUsados} usados · ${f.mediosDisponibles} disponibles</strong></div><div class="cl-list-item"><span>Deudas pendientes</span><strong>${f.deudas}</strong></div>${datos.deudas.filter(x=>x.estado==="pendiente").slice(0,5).map(x=>`<div class="cl-list-item"><span>${x.fechaGeneracion}<br><small>${escapeHtml(x.motivo||"Sin detalle")}</small></span><strong>${escapeHtml(x.tipo)}</strong></div>`).join("")}`}
-function datosUI(){qs("#estadoFeriados").textContent=formatearActualizacion(datos);qs("#historialCambios").innerHTML=datos.historial.length?datos.historial.slice(0,30).map(x=>`<div class="cl-list-item"><span>${new Date(x.fecha).toLocaleString("es-AR")}<br>${escapeHtml(x.detalle)}</span><strong>${escapeHtml(x.tipo)}</strong></div>`).join(""):"<div class=\"cl-list-item\"><span>No hay cambios registrados.</span></div>"}
-function configUI(){qs("#configForm").innerHTML=`<label>Tolerancia para revisión (minutos)<input id="cfgTol" type="number" min="0" max="60" value="${CONFIG.toleranciaMinutos}"></label><label>Margen de posible llegada tarde<input id="cfgTarde" type="number" min="1" max="120" value="${CONFIG.margenLlegadaTardeMinutos}"></label><label>Redondeo de entrada (0 = exacto)<input id="cfgEnt" type="number" min="0" max="60" value="${CONFIG.redondeoEntradaMinutos}"></label><label>Redondeo de salida (0 = exacto)<input id="cfgSal" type="number" min="0" max="60" value="${CONFIG.redondeoSalidaMinutos}"></label><label class="cl-radio-option"><input id="cfgExtra" type="checkbox" ${CONFIG.horasExtrasDespuesDeMedioFranco?"checked":""}> Habilitar extras después de medio franco</label>`}
-function configGuardar(){CONFIG.toleranciaMinutos=+qs("#cfgTol").value||0;CONFIG.margenLlegadaTardeMinutos=+qs("#cfgTarde").value||25;CONFIG.redondeoEntradaMinutos=+qs("#cfgEnt").value||0;CONFIG.redondeoSalidaMinutos=+qs("#cfgSal").value||0;CONFIG.horasExtrasDespuesDeMedioFranco=qs("#cfgExtra").checked;datos.configuracion={...CONFIG};registrarHistorial(datos,"configuracion","Se actualizaron reglas configurables.");guardar();renderTodo();toast("Reglas guardadas")}
-async function importar(){const f=qs("#inputImportar").files[0];if(!f)return toast("Elegí un JSON");try{const x=JSON.parse(await f.text());if(!validarRespaldo(x))throw Error("Respaldo inválido");if(!confirm("Esto reemplazará los datos actuales. ¿Continuar?"))return;datos=x;registrarHistorial(datos,"importacion","Respaldo JSON restaurado");guardar();renderTodo();toast("Respaldo restaurado")}catch(e){toast(`No se pudo importar: ${e.message}`)}}
-function guardar(){try{guardarDatos(datos);estado.textContent=`Guardado local · ${new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})}`}catch(e){estado.textContent="Error al guardar";toast(e.message)}}
-function pwa(){if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch(console.warn)}
+
+function openManualTime(key,type){
+  const box=document.getElementById("manual-time-content");
+  box.innerHTML=`
+    <h2 class="cl-modal-title">Ingresar hora manualmente</h2>
+    <p class="cl-modal-subtitle">${type==="entry"?"Entrada":"Salida"} del ${key}</p>
+    <label class="cl-field"><span>Hora</span><input id="manual-time-input" class="cl-time-input" type="time" value="${state.records[key]?.[type]||""}"></label>
+    <button class="cl-primary-btn" id="save-manual-time">Guardar</button>
+  `;
+  box.querySelector("#save-manual-time").onclick=()=>{
+    const value=box.querySelector("#manual-time-input").value;
+    try{
+      registerTime(state,key,type,value,true);persist();closeAllModals();openDay(parseDateKey(key));showToast("Hora manual guardada.");
+    }catch(e){showToast(e.message);}
+  };
+  openModal("manual-time-modal");
+}
+
+function openHalfday(key){
+  const box=document.getElementById("halfday-content");
+  box.innerHTML=`
+    <h2 class="cl-modal-title">Medio franco</h2>
+    <p class="cl-modal-subtitle">Tres medios francos equivalen a un día completo. Dos no alcanzan.</p>
+    <button class="cl-choice" id="apply-half">Aplicar un medio franco<small>Consume el medio franco disponible más antiguo y deja jornada de 4 horas.</small></button>
+    <button class="cl-choice" id="cover-full">Cubrir día entero<small>Consume tres medios francos disponibles, de los más antiguos.</small></button>
+    <button class="cl-choice" id="authorize-half">Registrar jornada reducida autorizada como deuda<small>No consume un medio franco disponible.</small></button>
+  `;
+  box.querySelector("#apply-half").onclick=()=>{
+    const result=useHalfCredit(state,key);
+    if(result.ok){persist();closeAllModals();openDay(parseDateKey(key));showToast("Medio franco aplicado.");}
+    else showToast(result.reason);
+  };
+  box.querySelector("#cover-full").onclick=()=>{
+    const result=useThreeHalfCredits(state,key);
+    if(result.ok){persist();closeAllModals();openDay(parseDateKey(key));showToast("Día cubierto con tres medios francos.");}
+    else showToast(result.reason);
+  };
+  box.querySelector("#authorize-half").onclick=()=>{
+    const result=authorizeDebt(state,key,"half");
+    if(result.ok){persist();closeAllModals();openDay(parseDateKey(key));showToast("Media jornada registrada como deuda.");}
+    else showToast(result.reason);
+  };
+  openModal("halfday-modal");
+}
+
+function goMonth(delta){
+  viewDate=new Date(viewDate.getFullYear(),viewDate.getMonth()+delta,1);
+  refresh();
+}
+function goToday(){viewDate=new Date();selectedDate=new Date();refresh();}
+
+function initEvents(){
+  document.getElementById("btn-prev-month").onclick=()=>goMonth(-1);
+  document.getElementById("btn-next-month").onclick=()=>goMonth(1);
+  document.getElementById("btn-today").onclick=goToday;
+  document.getElementById("btn-recalculate").onclick=()=>{classifySaturdays(state,selectedDate);syncGeneratedCredits(state);persist();showToast("Período recalculado.");};
+
+  document.querySelectorAll("[data-close-modal]").forEach(el=>el.addEventListener("click",closeAllModals));
+
+  document.querySelectorAll(".cl-tab").forEach(tab=>{
+    tab.onclick=()=>{
+      document.querySelectorAll(".cl-tab").forEach(x=>x.classList.remove("is-active"));
+      document.querySelectorAll(".cl-view").forEach(x=>x.classList.remove("is-active"));
+      tab.classList.add("is-active");
+      document.getElementById(`view-${tab.dataset.view}`).classList.add("is-active");
+      if(tab.dataset.view==="summary"){renderSummary(state, billingPeriodFor(selectedDate));}
+      if(tab.dataset.view==="history"){renderHistory(state);}
+      if(tab.dataset.view==="settings"){fillSettings(state);}
+    };
+  });
+
+  document.getElementById("btn-settings").onclick=()=>document.querySelector('[data-view="settings"]').click();
+
+  document.getElementById("btn-save-settings").onclick=()=>{
+    state.settings={
+      JORNAL_NORMAL:Number(document.getElementById("cfg-weekday-hours").value)||CONFIG.JORNAL_NORMAL,
+      JORNAL_MEDIO_FRANCO:Number(document.getElementById("cfg-half-day-hours").value)||CONFIG.JORNAL_MEDIO_FRANCO,
+      TOLERANCIA_MINUTOS:Number(document.getElementById("cfg-tolerance").value)||0,
+      MARGEN_LLEGADA_TARDE_MINUTOS:Number(document.getElementById("cfg-late-window").value)||CONFIG.MARGEN_LLEGADA_TARDE_MINUTOS,
+      CORTE_SABADO:document.getElementById("cfg-saturday-cutoff").value||CONFIG.CORTE_SABADO,
+      HORAS_EXTRAS_DESPUES_DE_MEDIO_FRANCO:document.getElementById("cfg-overtime-half-day").value==="true"
+    };
+    persist();showToast("Configuración guardada.");
+  };
+
+  document.getElementById("btn-refresh-holidays").onclick=async()=>{
+    const years=[viewDate.getFullYear(),viewDate.getFullYear()+1,viewDate.getFullYear()-1];
+    let ok=0;
+    for(const y of years){const r=await loadHolidaysForYear(state,y);if(r.ok)ok++;}
+    persist();showToast(ok?`Feriados actualizados (${ok} año(s)).`:"No se pudo actualizar; se conservan los datos locales.");
+  };
+
+  document.getElementById("btn-export").onclick=()=>exportState(state);
+  document.getElementById("file-import").onchange=async(e)=>{
+    const file=e.target.files[0]; if(!file)return;
+    if(!confirm("La importación reemplazará los datos actuales. ¿Continuar?"))return;
+    try{state=await importState(file);saveState(state);refresh();showToast("Respaldo importado.");}
+    catch(err){showToast("No se pudo importar el respaldo.");}
+    e.target.value="";
+  };
+  document.getElementById("btn-clear-data").onclick=()=>{
+    if(!confirm("Esto borrará todos los registros locales. ¿Continuar?"))return;
+    localStorage.clear(); location.reload();
+  };
+}
+
+async function boot(){
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch(error => {
+      console.warn("PWA: no se pudo registrar el service worker.", error);
+    });
+  }
+  initEvents();
+  syncGeneratedCredits(state);
+  const years=[new Date().getFullYear(),new Date().getFullYear()+1];
+  for(const y of years) await loadHolidaysForYear(state,y);
+  saveState(state);
+  refresh();
+}
+
+boot();

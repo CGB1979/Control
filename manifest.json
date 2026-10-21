@@ -1,1 +1,17 @@
-{"name":"Control Laboral","short_name":"Control Laboral","description":"Control personal de jornadas, horas extra, francos y feriados.","start_url":"./","scope":"./","display":"standalone","background_color":"#f4f6f8","theme_color":"#274c77","lang":"es-AR","icons":[{"src":"./assets/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}
+{
+  "name": "Mi Control Laboral",
+  "short_name": "Control Laboral",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f6f8fb",
+  "theme_color": "#ffffff",
+  "lang": "es-AR",
+  "icons": [
+    {
+      "src": "assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
