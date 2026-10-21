@@ -1,4 +1,4 @@
-const CACHE = "control-laboral-v8";
+const CACHE = "control-laboral-v9";
 const ASSETS = [
   "./",
   "./index.html",
@@ -12,7 +12,9 @@ const ASSETS = [
   "./js/summary.js",
   "./js/leaves.js",
   "./js/ui.js",
-  "./manifest.json"
+  "./manifest.json",
+  "./icons/icon-192.png",
+  "./icons/icon-512.png"
 ];
 
 self.addEventListener("install", event => {
