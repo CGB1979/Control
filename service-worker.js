@@ -1,10 +1,11 @@
-const CACHE = "control-laboral-v9";
+const CACHE = "control-laboral-v11";
 const ASSETS = [
   "./",
   "./index.html",
   "./css/app.css",
   "./js/app.js",
   "./js/config.js",
+  "./js/horarios.js",
   "./js/storage.js",
   "./js/holidays.js",
   "./js/time.js",

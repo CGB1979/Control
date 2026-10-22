@@ -1,6 +1,6 @@
 import { CONFIG, MESES, VERSION_APP } from "./config.js";
 import { loadState, saveState, addAudit, exportState, importState } from "./storage.js";
-import { isoDate, calculateDay, minutesFromTime, timeFromMinutes, suggestLateOrShift } from "./time.js";
+import { isoDate, calculateDay, minutesFromTime, timeFromMinutes, suggestLateOrShift, estimatedSchedule } from "./time.js";
 import { getHolidays, updateExternalHolidays } from "./holidays.js";
 import { renderCalendar, bindCalendar } from "./calendar.js";
 import { renderSummary, calculateMonth, calculateBillingCycle, formatHours } from "./summary.js";
@@ -74,6 +74,7 @@ function openDayModal(dateKey) {
   save();
 
   const status = record.leaveMode ? "leave" : holiday && !calc.worked ? "holiday" : calc.review ? "review" : "normal";
+  const estimated = estimatedSchedule(state, date);
   const statusText = record.leaveMode === "franco_entero" ? "Cubierto con franco entero" :
     record.leaveMode === "medio_franco_dia_completo" ? "Cubierto con 3 medios francos" :
     record.leaveMode === "medio_franco" ? "Jornada reducida con medio franco" :
@@ -108,6 +109,7 @@ function openDayModal(dateKey) {
       ${holiday ? `<button class="cl-btn cl-btn-secondary cl-btn-full" id="cl-holiday-no-work">Registrar que no se trabajó por feriado</button>` : ""}
       <button class="cl-btn cl-btn-secondary cl-btn-full" id="cl-delete-day">Eliminar registro del día</button>
     </div>
+    ${estimated ? `<div class="cl-note">Horario estimado: <strong>${escapeHtml(estimated.nombre)}</strong>. Se estima automáticamente con las últimas 3 jornadas; una marcación aislada diferente no cambia el turno.</div>` : `<div class="cl-note">Todavía no hay suficientes jornadas para estimar un turno. La aplicación no cambia de horario por una sola marcación diferente.</div>`}
     <div class="cl-note">Un toque en entrada/salida registra la hora actual. Si el botón ya tiene un registro, hacé triple toque para abrir la corrección. Las horas reales quedan conservadas por separado.</div>`);
 
   bindRegisterButton("cl-register-in", dateKey, "entrada", record);
@@ -430,8 +432,70 @@ function openLeaveList(title, items, type, debts = false) {
 function renderHistoryScreen() {
   const audit = state.audit.slice(0, 100);
   main.innerHTML = `<section class="cl-card"><h2>Historial</h2><div class="cl-muted cl-small">Cambios de horarios, registros y movimientos de francos.</div></section>
-    <section class="cl-card"><div class="cl-list">${audit.length ? audit.map(x => `<div class="cl-list-item"><span class="cl-list-dot"></span><div><div class="cl-list-title">${escapeHtml(historyLabel(x.action))}</div><div class="cl-list-meta">${new Date(x.timestamp).toLocaleString("es-AR")} · ${escapeHtml(JSON.stringify(x.details))}</div></div></div>`).join("") : `<div class="cl-note">Todavía no hay movimientos.</div>`}</div></section>`;
+    <section class="cl-card"><div class="cl-list">${audit.length ? audit.map(x => {
+      const details = formatHistoryDetails(x);
+      const stamp = new Date(x.timestamp).toLocaleString("es-AR");
+      return `<div class="cl-list-item cl-history-item">
+        <span class="cl-list-dot"></span>
+        <span class="cl-list-content">
+          <span class="cl-list-title">${escapeHtml(historyLabel(x.action))}</span>
+          <span class="cl-list-meta">${escapeHtml(stamp)}</span>
+          ${details ? `<span class="cl-history-detail">${details}</span>` : ""}
+        </span>
+      </div>`;
+    }).join("") : `<div class="cl-note">Todavía no hay movimientos.</div>`}</div></section>`;
 }
+
+function historyDate(value) {
+  if (!value) return "";
+  const date = dateFromKey(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return formatDate(value);
+}
+
+function historyTime(value) {
+  return value ? String(value).slice(0, 5) : "";
+}
+
+function formatHistoryDetails(item) {
+  const d = item?.details || {};
+  switch (item.action) {
+    case "marcacion_registrada":
+      return `Fecha: <strong>${escapeHtml(historyDate(d.date))}</strong> · ${d.type === "entrada" ? "Entrada" : "Salida"}: <strong>${escapeHtml(historyTime(d.time))}</strong>`;
+    case "marcacion_corregida": {
+      const previous = d.previous || {};
+      const current = d.current || {};
+      return `Fecha: <strong>${escapeHtml(historyDate(d.date))}</strong> · ${d.type === "entrada" ? "Entrada" : "Salida"}: <strong>${escapeHtml(historyTime(previous.time))}</strong> → <strong>${escapeHtml(historyTime(current.time))}</strong>`;
+    }
+    case "registro_dia_eliminado":
+      return `Fecha eliminada: <strong>${escapeHtml(historyDate(d.date))}</strong>`;
+    case "franco_generado":
+      return `Fecha generada: <strong>${escapeHtml(historyDate(d.date))}</strong>${d.reason ? ` · ${escapeHtml(d.reason)}` : ""}`;
+    case "franco_usado":
+      return `Fecha generada: <strong>${escapeHtml(historyDate(d.generatedDate))}</strong> · Fecha usada: <strong>${escapeHtml(historyDate(d.usedOn))}</strong>`;
+    case "franco_adeudado":
+      return `Fecha usada/adeudada: <strong>${escapeHtml(historyDate(d.date))}</strong>${d.reason ? ` · ${escapeHtml(d.reason)}` : ""}`;
+    case "medio_franco_generado":
+      return `Fecha generada: <strong>${escapeHtml(historyDate(d.date))}</strong>${d.reason ? ` · ${escapeHtml(d.reason)}` : ""}`;
+    case "medio_franco_usado":
+      return `Fecha generada: <strong>${escapeHtml(historyDate(d.generatedDate))}</strong> · Fecha usada: <strong>${escapeHtml(historyDate(d.usedOn))}</strong>`;
+    case "medio_franco_adeudado":
+      return `Fecha usada/adeudada: <strong>${escapeHtml(historyDate(d.date))}</strong>${d.reason ? ` · ${escapeHtml(d.reason)}` : ""}`;
+    case "tres_medios_usados":
+      return `Fecha cubierta: <strong>${escapeHtml(historyDate(d.date))}</strong> · ${d.adelantado ? "1 medio fue adelantado" : "3 medios disponibles"}`;
+    case "cambio_turno":
+      return `Fecha: <strong>${escapeHtml(historyDate(d.date))}</strong> · Nueva entrada habitual: <strong>${escapeHtml(historyTime(d.newReference))}</strong>`;
+    case "deuda_compensada":
+      return `${d.type === "franco" ? "Franco" : "Medio franco"} · deuda compensada`;
+    case "configuracion_actualizada":
+      return `Se actualizaron las preferencias de la aplicación.`;
+    case "consumos_francos_revertidos":
+      return `Fecha: <strong>${escapeHtml(historyDate(d.date))}</strong> · Se revirtieron consumos asociados a pruebas.`;
+    default:
+      return "";
+  }
+}
+
 function historyLabel(action) {
   return ({
     marcacion_registrada: "Registro de horario",
@@ -445,7 +509,9 @@ function historyLabel(action) {
     medio_franco_adeudado: "Medio franco adelantado / adeudado",
     tres_medios_usados: "Tres medios francos aplicados",
     cambio_turno: "Cambio de turno",
-    deuda_compensada: "Deuda compensada"
+    deuda_compensada: "Deuda compensada",
+    configuracion_actualizada: "Configuración actualizada",
+    consumos_francos_revertidos: "Consumos de francos revertidos"
   })[action] || action;
 }
 

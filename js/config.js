@@ -13,6 +13,11 @@ export const CONFIG = {
   // Ej.: 5 minutos permite 7:55 como caso a revisar, no como incumplimiento automático.
   TOLERANCIA_MINUTOS: 5,
 
+  // Tolerancia específica para redondear horas extras por jornal.
+  // 10 minutos antes/después del bloque horario permiten conservar
+  // la hora entera más cercana sin acumular minutos entre jornadas.
+  TOLERANCIA_REDONDEO_EXTRA_MINUTOS: 10,
+
   // Redondeo: "ninguno", "abajo", "arriba" o "cercano".
   // Se aplica solo a la referencia de cálculo, NUNCA destruye la hora real.
   REDONDEO_ENTRADA: "ninguno",
@@ -73,5 +78,5 @@ export const MESES = [
 ];
 
 // Por defecto: NO. Puede activarse desde la configuración.
-export const VERSION_APP = "1.0.9";
+export const VERSION_APP = "1.0.11";
 export const FERIADO_EXCESO_GENERA_FRANCO = false;

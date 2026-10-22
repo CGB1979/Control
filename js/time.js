@@ -1,4 +1,5 @@
 import { CONFIG } from "./config.js";
+import { horarioMasCercano, detectarHorarioHabitual } from "./horarios.js";
 
 export function minutesFromTime(value) {
   if (!/^\d{2}:\d{2}$/.test(value || "")) return null;
@@ -70,6 +71,71 @@ export function classifySaturday(record) {
   return record?.saturdayType || null;
 }
 
+
+export function roundExtraMinutes(minutes, tolerance = CONFIG.TOLERANCIA_REDONDEO_EXTRA_MINUTOS) {
+  const value = Math.max(0, Math.round(minutes || 0));
+  if (!value) return 0;
+
+  // Bloques enteros por jornal. La tolerancia permite considerar completa
+  // una hora cuando faltan hasta N minutos para llegar al bloque siguiente,
+  // y también cuando se excede hasta N minutos del bloque exacto.
+  const hours = Math.floor(value / 60);
+  const remainder = value % 60;
+
+  if (remainder <= tolerance) return hours * 60;
+  if (remainder >= 60 - tolerance) return (hours + 1) * 60;
+
+  // Entre ambos márgenes se conserva la hora más cercana.
+  return Math.round(value / 60) * 60;
+}
+
+export function roundExtraBuckets(extra50, extra100) {
+  const total = Math.max(0, (extra50 || 0) + (extra100 || 0));
+  if (!total) return { extra50: 0, extra100: 0 };
+
+  const roundedTotal = roundExtraMinutes(total);
+  if (!roundedTotal) return { extra50: 0, extra100: 0 };
+
+  // Conserva la clasificación de cada tramo tanto como sea posible.
+  // El tramo al 100 % se prioriza cuando es el que completa el último
+  // bloque horario; así no se cambia artificialmente una hora de tasa.
+  const raw50 = Math.max(0, extra50 || 0);
+  const raw100 = Math.max(0, extra100 || 0);
+
+  if (!raw50) return { extra50: 0, extra100: roundedTotal };
+  if (!raw100) return { extra50: roundedTotal, extra100: 0 };
+
+  const rounded50 = roundExtraMinutes(raw50);
+  const rounded100 = roundExtraMinutes(raw100);
+
+  if (rounded50 + rounded100 === roundedTotal) {
+    return { extra50: rounded50, extra100: rounded100 };
+  }
+
+  // Si el redondeo independiente no coincide con el total, mantiene
+  // los bloques completos del 50 % y coloca el resto en 100 %.
+  const base50 = Math.floor(raw50 / 60) * 60;
+  const remaining = Math.max(0, roundedTotal - base50);
+  return {
+    extra50: Math.min(base50, roundedTotal),
+    extra100: Math.max(0, remaining)
+  };
+}
+
+export function estimatedSchedule(state, date) {
+  const dateKey = iso(date);
+  const habitual = detectarHorarioHabitual(state, dateKey);
+  if (habitual) return habitual;
+
+  const current = state?.records?.[dateKey];
+  const entry = current?.punches
+    ?.filter(p => p.type === "entrada")
+    ?.sort((a, b) => a.timestamp - b.timestamp)[0];
+
+  if (!entry) return null;
+  return horarioMasCercano(minutesFromTime(entry.referenceTime || entry.time));
+}
+
 export function calculateDay(record, date, holiday, settings = {}) {
   const real = realWorkedMinutes(record);
   const reference = effectiveReferenceMinutes(record);
@@ -84,7 +150,7 @@ export function calculateDay(record, date, holiday, settings = {}) {
   let extra50 = 0;
   let extra100 = 0;
   let review = false;
-  let leaveMode = record?.leaveMode || null;
+  const leaveMode = record?.leaveMode || null;
 
   if (record?.leaveMode === "franco_entero") {
     counted = required;
@@ -92,38 +158,93 @@ export function calculateDay(record, date, holiday, settings = {}) {
     required = CONFIG.JORNADA_MEDIO_FRANCO_HORAS * 60;
     counted = required;
     if (CONFIG.HORAS_EXTRAS_DESPUES_DE_MEDIO_FRANCO && reference > required) {
-      // Regla deliberadamente preparada para activarse más adelante.
       extra50 = reference - required;
     }
   } else if (record?.leaveMode === "medio_franco_dia_completo") {
     counted = required;
   } else if (sunday || holidayWorked) {
-    // DOMINGOS Y FERIADOS: toda la jornada efectivamente trabajada
-    // se clasifica al 100 %. No se descuenta primero un jornal de 8 h.
+    // Domingo/feriado: el día trabajado cuenta como 1 jornal para el
+    // registro de jornadas, pero todas las horas se clasifican al 100 %.
+    // El total del día se redondea a horas enteras; no se arrastran
+    // minutos sobrantes entre jornadas. Con la tolerancia actual de 10 min,
+    // 07:50 -> 16:00 (8h10) computa como 8h al 100 %.
     counted = required;
-    extra100 = reference;
+    extra100 = roundExtraMinutes(reference);
   } else if (saturday) {
     const type = record?.saturdayType || "provisional";
     if (type === "voluntario") {
-      // Sábado voluntario: hasta 13:00 al 50 %, después al 100 %.
       const before13 = overlapMinutes(record, 0, 13 * 60);
       const after13 = Math.max(0, reference - before13);
       extra50 = before13;
       extra100 = after13;
       counted = reference;
     } else {
-      // Sábado obligatorio: 8 h de jornal. El excedente se divide por 13:00.
       counted = Math.min(reference, CONFIG.JORNAL_SABADO_OBLIGATORIO * 60);
       const overtimeStart = distributeSaturdayOvertime(record, reference);
       extra50 = overtimeStart.before13;
       extra100 = overtimeStart.after13;
     }
   } else {
-    counted = Math.min(reference, required);
-    extra50 = Math.max(0, reference - required);
+    // Jornada normal: la entrada anticipada no genera extra. Las extras
+    // comienzan recién después del horario de salida del turno estimado.
+    const schedule = estimatedScheduleFromRecord(record, date);
+    const scheduledEnd = schedule ? minutesFromTime(schedule.salida) : null;
+    const scheduledStart = schedule ? minutesFromTime(schedule.entrada) : null;
+
+    if (scheduledEnd !== null) {
+      const workStart = buildIntervals(record).reduce((min, x) => Math.min(min, x.start), Infinity);
+      const firstStart = Number.isFinite(workStart) ? workStart : scheduledStart;
+      const effectiveEnd = reference;
+
+      counted = Math.min(required, Math.max(0, effectiveEnd - Math.min(firstStart ?? scheduledStart, scheduledStart ?? firstStart)));
+
+      // La llegada antes de hora nunca se convierte en extra.
+      // El jornal normal se limita a 8 h.
+      counted = Math.min(reference, required);
+
+      if (effectiveEnd > scheduledEnd) {
+        const rawExtra = effectiveEnd - scheduledEnd;
+        extra100 = roundExtraMinutes(rawExtra);
+      }
+    } else {
+      counted = Math.min(reference, required);
+      extra50 = Math.max(0, reference - required);
+    }
   }
 
-  // Tolerancia: no castiga automáticamente una diferencia pequeña.
+  // Tratamiento especial del turno 06:00-14:00:
+  // si la entrada corresponde al turno 06-14 y la salida llega a 13:30,
+  // la empresa considera completo el jornal. Las extras comienzan recién
+  // después de las 14:00.
+  const scheduleForSpecial = estimatedScheduleFromRecord(record, date);
+  if (!leaveMode && hasWork && scheduleForSpecial?.id === "06-14" && !sunday && !holidayWorked && !saturday) {
+    const specialStart = minutesFromTime(scheduleForSpecial.entrada);
+    const specialEnd = minutesFromTime(scheduleForSpecial.salida);
+    const specialMinimum = minutesFromTime(scheduleForSpecial.salidaMinimaJornal || "13:30");
+    const lastEnd = buildIntervals(record).reduce((max, x) => Math.max(max, x.end), 0);
+
+    if (reference >= specialMinimum && reference <= specialEnd) {
+      counted = required;
+      extra50 = 0;
+      extra100 = 0;
+    } else if (reference > specialEnd) {
+      counted = required;
+      extra50 = 0;
+      extra100 = roundExtraMinutes(reference - specialEnd);
+    } else if (specialStart !== null && reference < specialMinimum) {
+      counted = Math.min(required, reference);
+    }
+  }
+
+  // Para extras mixtas (p. ej. sábados), redondear por jornal sin acumular
+  // minutos de un día a otro.
+  if (!sunday && !holidayWorked && !leaveMode && (extra50 > 0 || extra100 > 0) && saturday) {
+    const rounded = roundExtraBuckets(extra50, extra100);
+    extra50 = rounded.extra50;
+    extra100 = rounded.extra100;
+  }
+
+  // Tolerancia de cumplimiento del jornal, separada del redondeo de extras.
   if (!record?.leaveMode && required > 0 && reference < required) {
     const missing = required - reference;
     review = missing > CONFIG.TOLERANCIA_MINUTOS;
@@ -146,8 +267,18 @@ export function calculateDay(record, date, holiday, settings = {}) {
     holidayWorked,
     feriadoExcesoGeneraFranco,
     leaveMode,
-    saturdayType: record?.saturdayType || null
+    saturdayType: record?.saturdayType || null,
+    estimatedSchedule: estimatedScheduleFromRecord(record, date)
   };
+}
+
+function estimatedScheduleFromRecord(record, date) {
+  const entry = record?.punches
+    ?.filter(p => p.type === "entrada")
+    ?.sort((a, b) => a.timestamp - b.timestamp)[0];
+
+  if (!entry) return null;
+  return horarioMasCercano(minutesFromTime(entry.referenceTime || entry.time));
 }
 
 function overlapMinutes(record, startLimit, endLimit) {
@@ -191,21 +322,8 @@ function distributeSaturdayOvertime(record, reference) {
 }
 
 export function inferUsualEntry(state, date) {
-  const previous = Object.entries(state.records)
-    .filter(([key, record]) => key < iso(date) && record?.punches?.some(p => p.type === "entrada"))
-    .sort(([a],[b]) => b.localeCompare(a))
-    .slice(0, 30);
-
-  const values = previous
-    .map(([, record]) => record.punches.find(p => p.type === "entrada"))
-    .filter(Boolean)
-    .map(p => minutesFromTime(p.referenceTime || p.time))
-    .filter(v => v !== null);
-
-  if (values.length < CONFIG.MIN_REGISTROS_PARA_INFERIR_TURNO) return null;
-  const sorted = [...values].sort((a,b) => a-b);
-  const middle = sorted[Math.floor(sorted.length / 2)];
-  return middle;
+  const schedule = detectarHorarioHabitual(state, iso(date));
+  return schedule ? minutesFromTime(schedule.entrada) : null;
 }
 
 export function suggestLateOrShift(state, date, entryTime) {

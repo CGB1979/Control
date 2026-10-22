@@ -195,3 +195,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .cl-detail-label { font-size: 11px; color: var(--cl-muted); font-weight: 750; text-transform: uppercase; letter-spacing: .03em; }
 .cl-detail-date strong { font-size: 14px; }
 .cl-detail-hint { font-size: 11px; color: var(--cl-muted); }
+
+.cl-history-item { align-items: start; }
+.cl-history-detail { color: var(--cl-text); font-size: 12px; line-height: 1.45; margin-top: 4px; }
+.cl-history-detail strong { font-weight: 800; }
